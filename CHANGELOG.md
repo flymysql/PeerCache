@@ -6,6 +6,29 @@ All notable changes to PeerCache are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-05-31
+
+### Added
+- **Single-process multi-rail (multi-NIC) reads.** A single `PeerCacheStore`
+  process can now drive several RDMA devices at once. Set
+  `device_names="mlx5_bond_1,…,mlx5_bond_8"` (or `--devices` on the benchmark)
+  and the engine opens one rail (its own `RdmaContext` + `ConnectionManager`)
+  per device, registers every buffer on all rails, and **stripes each batch of
+  one-sided READs across all rails inside one GIL-released C++ call**
+  (`TransferEngine::batch_read_multi`), so a single process can approach the
+  aggregate bandwidth of all its NICs instead of being capped by one card / the
+  GIL. Rails pair by index across nodes, so `--devices` must list the same
+  devices in the same order on both ends.
+  - `DataLocation` now carries per-rail `rail_endpoints[]` / `rail_rkeys[]` for
+    the published-pool MR (the legacy single `rdma_endpoint`/`rkey` is kept as
+    rail 0, so the directory wire format stays backward compatible).
+  - `--devices` added to `peercache-bench serve` / `drive`.
+
+### Changed
+- `TransferEngine` is now multi-rail internally (a single device behaves exactly
+  as before). `register_mr` returns one handle per rail; new `local_endpoints()`
+  and `n_rails()`.
+
 ## [0.4.0] - 2026-05-31
 
 ### Added
@@ -143,6 +166,7 @@ Initial release.
   lightweight TCP RPC.
 - MkDocs SDK documentation site and GitHub Actions for CI, docs, and release.
 
+[0.5.0]: https://github.com/flymysql/PeerCache/releases/tag/v0.5.0
 [0.4.0]: https://github.com/flymysql/PeerCache/releases/tag/v0.4.0
 [0.3.0]: https://github.com/flymysql/PeerCache/releases/tag/v0.3.0
 [0.2.0]: https://github.com/flymysql/PeerCache/releases/tag/v0.2.0
