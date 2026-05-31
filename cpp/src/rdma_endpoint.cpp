@@ -2,6 +2,7 @@
 
 #include <cstring>
 #include <random>
+#include <stdexcept>
 
 namespace peercache {
 
