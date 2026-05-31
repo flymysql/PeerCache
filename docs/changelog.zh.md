@@ -2,7 +2,7 @@
 
 本项目遵循 [语义化版本](https://semver.org/)。
 
-## [未发布]
+## [0.1.1] - 2026-05-31
 
 ### 变更
 - **内嵌 meta**：取消了对单独 meta 进程的依赖。IP 等于 `discovery_addr` 的节点现在
@@ -30,4 +30,5 @@
 - 用于无 RDMA 硬件功能性测试的 TCP 回退传输。
 - MkDocs SDK 文档站点，以及用于 CI、文档、发布的 GitHub Actions。
 
+[0.1.1]: https://github.com/flymysql/PeerCache/releases/tag/v0.1.1
 [0.1.0]: https://github.com/flymysql/PeerCache/releases/tag/v0.1.0

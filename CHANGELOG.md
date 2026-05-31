@@ -4,13 +4,14 @@ All notable changes to PeerCache are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.1.1] - 2026-05-31
 
 ### Changed
 - **Embedded meta**: removed the requirement for a separate meta process. The
   node whose IP equals `discovery_addr` now auto-hosts the discovery service
   in-process; co-located nodes that cannot bind the port fall back to client
-  mode automatically.
+  mode automatically. Adds `PeerCacheConfig.meta_bind_host` and
+  `NodeRuntime.is_meta`.
 
 ### Added
 - Bilingual (English / 中文) documentation with a language switcher
@@ -39,4 +40,5 @@ Initial release.
   lightweight TCP RPC.
 - MkDocs SDK documentation site and GitHub Actions for CI, docs, and release.
 
+[0.1.1]: https://github.com/flymysql/PeerCache/releases/tag/v0.1.1
 [0.1.0]: https://github.com/flymysql/PeerCache/releases/tag/v0.1.0
