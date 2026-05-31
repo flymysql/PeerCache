@@ -28,27 +28,63 @@ jobs:
           python -m twine check dist/*
       - uses: actions/upload-artifact@v4
         with:
-          name: sdist
+          name: dist-sdist
           path: dist/*.tar.gz
+
+  build-wheels:
+    name: Build manylinux wheels
+    runs-on: ubuntu-latest
+    # Best-effort: a wheel-build failure must never block the sdist publish.
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["cp39", "cp310", "cp311", "cp312"]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build wheels (${{ matrix.python }})
+        uses: pypa/cibuildwheel@v2.21.3
+        env:
+          CIBW_BUILD: "${{ matrix.python }}-manylinux_x86_64"
+          CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28
+          # RDMA dev headers/libs for the C++ data plane build.
+          CIBW_BEFORE_ALL_LINUX: >-
+            dnf install -y rdma-core-devel ||
+            dnf install -y libibverbs-devel librdmacm-devel ||
+            yum install -y rdma-core-devel
+          # Do NOT vendor libibverbs/librdmacm into the wheel -- they must come
+          # from the host's rdma-core at runtime; PeerCache falls back to the TCP
+          # transport if they are absent.
+          CIBW_REPAIR_WHEEL_COMMAND_LINUX: >-
+            auditwheel repair --exclude libibverbs.so.1 --exclude librdmacm.so.1
+            -w {dest_dir} {wheel}
+          CIBW_TEST_SKIP: "*"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-wheels-${{ matrix.python }}
+          path: wheelhouse/*.whl
 
   github-release:
     name: Publish GitHub Release
-    needs: build-sdist
+    needs: [build-sdist, build-wheels]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: sdist
+          pattern: dist-*
           path: dist
-      - name: Create release and attach the package
+          merge-multiple: true
+      - name: Create release and attach the packages
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/*.tar.gz
+          files: |
+            dist/*.tar.gz
+            dist/*.whl
           generate_release_notes: true
 
   pypi-publish:
     name: Publish to PyPI (trusted publishing)
-    needs: build-sdist
+    needs: [build-sdist, build-wheels]
     runs-on: ubuntu-latest
     # Requires a PyPI Trusted Publisher for this repo/workflow:
     # PyPI project -> Publishing -> add GitHub publisher: flymysql/PeerCache,
@@ -62,9 +98,10 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: sdist
+          pattern: dist-*
           path: dist
-      - name: Publish
+          merge-multiple: true
+      - name: Publish (sdist + wheels)
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist

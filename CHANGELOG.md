@@ -6,6 +6,8 @@ All notable changes to PeerCache are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-05-31
+
 ### Added
 - **Concurrent multi-threaded reads/writes** on both client and server. The RDMA
   data plane now uses a **per-peer channel pool**, where each channel is an RC QP
