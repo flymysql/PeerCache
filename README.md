@@ -4,7 +4,9 @@
 [![Docs](https://github.com/flymysql/PeerCache/actions/workflows/docs.yml/badge.svg)](https://flymysql.github.io/PeerCache/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-A lightweight, peer-to-peer **L3 storage backend for SGLang HiCache**.
+A lightweight, peer-to-peer **L3 storage backend for SGLang HiCache**, built for
+**PD-disaggregated (prefill/decode) inference**: prefill workers publish KV pages,
+decode workers read them back over RDMA with zero CPU copies.
 
 Docs: <https://flymysql.github.io/PeerCache/>
 

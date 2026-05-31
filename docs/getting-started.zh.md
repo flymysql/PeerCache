@@ -1,5 +1,9 @@
 # 快速开始
 
+PeerCache 是面向 **PD 分离（prefill/decode 分离）的 SGLang 推理**的跨节点 KV 缓存
+传输层：prefill 节点发布 KV 页面，decode 节点通过 RDMA 读回。数据流与拷贝次数详见
+[架构](architecture.md)。
+
 ## 环境要求
 
 - Python 3.9+
@@ -62,23 +66,77 @@ python -m sglang.launch_server \
   }'
 ```
 
+## 部署拓扑（PD 分离）
+
+一个典型的 PD 分离集群：
+
+```mermaid
+flowchart LR
+    subgraph prefill [Prefill 池]
+      PF0["node-0（发现主机 + 内嵌 meta）"]
+      PF1[node-1]
+    end
+    subgraph decode [Decode 池]
+      DC0[node-2]
+      DC1[node-3]
+    end
+    PF1 & DC0 & DC1 -. 注册/心跳 .-> PF0
+    DC0 & DC1 ==>|RDMA READ KV| PF0 & PF1
+```
+
+经验法则：
+
+- 在每个 prefill 和 decode 节点上运行**相同**的 PeerCache 后端配置，且
+  **`discovery_addr` 处处一致**。
+- 为 `discovery_addr` 选定某个节点的 IP（任意可达节点，通常是某个 prefill 节点）。
+  该节点会自动承担内嵌 meta，无需另外启动任何东西。
+- 按每个节点应常驻多少已发布 KV 来设置 `global_segment_size`（它会按 `tp_size`
+  切分）；池越大命中率越高，但锁定的主机内存也越多。
+- 生产用 `protocol: rdma`；`protocol: tcp` 仅用于功能性测试。
+- 所有节点之间必须能互相访问 RDMA 端口、控制端口（`rdma_port` / `control_port`，
+  默认自动分配）以及发现端口。
+
 ## extra_config 参数参考
+
+必填项（dynamic 工厂需要前三项）：
 
 | 键 | 默认值 | 含义 |
 |---|---|---|
 | `backend_name` | — | 必须为 `peercache`（dynamic 工厂要求） |
 | `module_path` | — | `peercache.store`（必填） |
 | `class_name` | — | `PeerCacheStore`（必填） |
-| `discovery_addr` | — | 发现主机 `host:port`，所有节点一致；IP 相符的节点自动承担 meta（**必填**） |
-| `meta_bind_host` | `0.0.0.0` | 本节点作为发现主机时，内嵌 meta 绑定的网卡接口 |
-| `protocol` | `rdma` | `rdma` 或 `tcp`（回退传输） |
+| `discovery_addr` | — | 发现主机 `host:port`，**所有节点一致**；IP 相符的节点自动承担 meta（**必填**） |
+
+RDMA / 传输：
+
+| 键 | 默认值 | 含义 |
+|---|---|---|
+| `protocol` | `rdma` | `rdma`（生产）或 `tcp`（测试用回退传输） |
 | `device_name` | `""` | RDMA 设备，如 `mlx5_0`；为空则取第一个激活设备 |
 | `ib_port` | `1` | HCA 端口 |
 | `gid_index` | `3` | GID 索引（RoCE v2 通常为 3） |
-| `global_segment_size` | `4gb` | 每节点发布池大小（按 tp_size 切分） |
-| `vnodes` | `160` | 哈希环上每节点的虚拟节点数 |
-| `directory_replicas` | `1` | `> 1` 时复制目录条目以实现高可用 |
-| `rdma_port` / `control_port` | `0` | 绑定端口；`0` 表示自动分配 |
+
+容量 / 放置：
+
+| 键 | 默认值 | 含义 |
+|---|---|---|
+| `global_segment_size` | `4gb` | 每节点发布池大小（接受 `int` 或 `"8gb"`/`"512mb"`；按 `tp_size` 切分） |
+| `vnodes` | `160` | 一致性哈希环上每节点的虚拟节点数 |
+| `directory_replicas` | `1` | `> 1` 时把目录条目复制到 N 个归属者以实现高可用 |
+
+网络 / 身份（一般无需修改）：
+
+| 键 | 默认值 | 含义 |
+|---|---|---|
+| `meta_bind_host` | `0.0.0.0` | 本节点作为发现主机时，内嵌 meta 绑定的网卡接口 |
+| `local_hostname` | 自动 | 对外公告的 IP；自动解析为能到达 `discovery_addr` 的本机 IP |
+| `rdma_bind_host` | `0.0.0.0` | RDMA 数据面绑定接口 |
+| `rdma_port` | `0` | RDMA 引导端口；`0` 表示自动分配 |
+| `control_bind_host` | `0.0.0.0` | 控制 RPC 服务器绑定接口 |
+| `control_port` | `0` | 控制 RPC 端口；`0` 表示自动分配 |
+| `node_id` | 自动 | 稳定的节点标识；由 `local_hostname` + 随机后缀自动生成 |
+| `heartbeat_interval` | `2.0` | 成员心跳间隔（秒） |
+| `member_ttl` | `6.0` | meta 将静默节点剔除前的等待秒数 |
 
 ## TCP 回退（无 RDMA）
 

@@ -3,7 +3,9 @@
 **Peer-to-peer RDMA zero-copy L3 KV-cache backend for SGLang HiCache.**
 
 PeerCache gives you Mooncake-style RDMA zero-copy KV-cache sharing across nodes,
-but **without** the centralized `master` + `metadata` services.
+but **without** the centralized `master` + `metadata` services. It is built for
+**PD-disaggregated (prefill/decode) SGLang inference**: prefill workers publish KV
+pages, and decode workers read them back over RDMA with zero CPU copies.
 
 ```mermaid
 flowchart LR
