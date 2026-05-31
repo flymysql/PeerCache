@@ -35,6 +35,7 @@ nav:
   - Getting Started: getting-started.md
   - Architecture: architecture.md
   - SDK Reference: sdk.md
+  - Benchmarks: benchmarks.md
   - Changelog: changelog.md
 
 markdown_extensions:
