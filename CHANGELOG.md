@@ -7,13 +7,16 @@ All notable changes to PeerCache are documented here. The format is based on
 ## [Unreleased]
 
 ### Added
-- **Benchmark harness** (`benchmarks/`): a reproducible PeerCache-vs-Mooncake
-  comparison that drives, under one workload, PeerCache's data-plane
-  (`transport-read`), PeerCache's full store path (`store-get`), and Mooncake's
-  official `transfer_engine_bench`. Runs over RDMA (publishable numbers) or the
-  TCP fallback (plumbing validation). Emits JSON + Markdown reports, ships a
-  committed single-host TCP reference baseline, and documents the RDMA-hardware
-  reproduction recipe. New `Benchmarks` docs page (EN/中文) and a `bench` extra.
+- **Benchmark harness** (`benchmarks/`): a systematic, RDMA-first benchmark
+  that drives PeerCache's `HiCacheStorage` interface exactly as SGLang HiCache
+  does (PD-disaggregated `batch_set_v1` / `batch_exists` / `batch_get_v1`) via a
+  faithful `mem_pool_host` simulator (MLA/MHA). Reports throughput (pages/s,
+  tokens/s, GB/s) and latency tail (p50/p95/p99/p999/max) across a thread-model
+  sweep, including full-load saturation/peak throughput, with `latency`,
+  `throughput`, `saturation`, and `suite` modes. Memory-bounded HDR-style latency
+  histogram. Includes an optional Mooncake `transfer_engine_bench` comparison and
+  a low-level data-plane microbench. New `Benchmarks` docs page (EN/中文) and a
+  `bench` extra. The TCP fallback is for functional smoke testing only.
 
 ## [0.2.0] - 2026-05-31
 

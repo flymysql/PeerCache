@@ -15,7 +15,7 @@ site/
 .cache/
 _skbuild/
 
-# Benchmark run artifacts (keep only the committed reference baseline).
+# Benchmark run artifacts. Results are RDMA-hardware specific; commit a chosen
+# baseline explicitly with `git add -f benchmarks/results/<file>`.
 benchmarks/results/*
-!benchmarks/results/sandbox-tcp-baseline.json
-!benchmarks/results/sandbox-tcp-baseline.md
+!benchmarks/results/.gitkeep
