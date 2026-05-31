@@ -107,21 +107,25 @@ PYTHONPATH=python pytest tests/ -v
 
 ## Benchmarks
 
-A reproducible harness in [`benchmarks/`](benchmarks/) measures PeerCache's data
-plane and compares it, under an identical workload, with Mooncake's official
-`transfer_engine_bench`. It runs over RDMA (real numbers) or the TCP fallback
-(plumbing validation only).
+A systematic harness in [`benchmarks/`](benchmarks/) drives PeerCache's
+`HiCacheStorage` interface exactly as **SGLang HiCache** does (PD-disaggregated
+`batch_set_v1` / `batch_exists` / `batch_get_v1`) and reports throughput
+(pages/s, tokens/s, GB/s) and latency tail (p50/p95/p99/p999/max) across a sweep
+of thread models, including the full-load saturation/peak throughput.
 
 ```bash
-PYTHONPATH=python:benchmarks python benchmarks/run_baseline.py \
-    --protocol tcp --block-sizes 4k,64k,1m --duration 5 --tag sandbox
+# RDMA hardware (publishable numbers)
+PYTHONPATH=python:benchmarks python benchmarks/bench_hicache.py suite \
+    --device-name mlx5_0 --layout mla --page-size 131072 \
+    --batch-size 32 --concurrencies 1,2,4,8,16,32,64 --duration 10 --tag rdma
 ```
 
-> **Do not quote TCP/loopback numbers as RDMA performance.** Both projects are
-> RDMA-first; publishable figures must be measured on RDMA hardware. See
+> **RDMA-first.** PeerCache is built on RDMA one-sided READ; publishable figures
+> must be measured on RDMA hardware. The TCP fallback is for functional smoke
+> testing only and must not be quoted. See
 > [`benchmarks/README.md`](benchmarks/README.md) and the
 > [Benchmarks docs](https://flymysql.github.io/PeerCache/benchmarks/) for the
-> methodology, the committed sandbox baseline, and the RDMA reproduction recipe.
+> methodology, thread models, metric definitions, and reproduction recipe.
 
 ## Maintainer setup (one-time)
 

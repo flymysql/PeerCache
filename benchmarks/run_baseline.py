@@ -53,7 +53,7 @@ def parse_sizes(s: str):
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="PeerCache vs Mooncake baseline")
-    ap.add_argument("--protocol", default="tcp", choices=["tcp", "rdma"])
+    ap.add_argument("--protocol", default="rdma", choices=["rdma", "tcp"])
     ap.add_argument("--device-name", default="", help="RDMA device for both systems, e.g. mlx5_0")
     ap.add_argument("--block-sizes", default="4096,65536,1048576",
                     help="comma list, e.g. 4k,64k,1m")
