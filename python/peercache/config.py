@@ -37,6 +37,11 @@ class PeerCacheConfig:
     # RDMA / transport.
     protocol: str = "rdma"  # "rdma" or "tcp" (fallback)
     device_name: str = ""  # e.g. "mlx5_0"; empty -> first active device
+    # Multi-rail (multi-NIC): comma-separated device list, e.g.
+    # "mlx5_bond_1,mlx5_bond_2,...". When set (>1 device) a single process opens
+    # one RDMA rail per device and stripes READs across all of them, so it can
+    # drive several NICs without the GIL capping it. Overrides device_name.
+    device_names: str = ""
     ib_port: int = 1
     gid_index: int = 3
     # Number of RC QP "channels" pooled per peer. Each channel has its own CQ,
@@ -97,10 +102,22 @@ class PeerCacheConfig:
         if not self.node_id:
             self.node_id = f"{self.local_hostname}-{uuid.uuid4().hex[:8]}"
         self.global_segment_size = _parse_size(self.global_segment_size)
+        # Normalise the rail device list: prefer device_names, else device_name,
+        # else [""] (single rail, auto-pick first device).
+        if self.device_names:
+            self._rails = [d.strip() for d in str(self.device_names).split(",") if d.strip()]
+        elif self.device_name:
+            self._rails = [self.device_name]
+        else:
+            self._rails = [""]
         self.disk_size = _parse_size(self.disk_size)
         self.disk_enabled = _as_bool(self.disk_enabled)
         self.metrics_enabled = _as_bool(self.metrics_enabled)
         self.metrics_dashboard = _as_bool(self.metrics_dashboard)
+
+    def device_rails(self) -> list:
+        """Ordered list of RDMA device names, one per rail (>=1)."""
+        return list(getattr(self, "_rails", None) or [self.device_name or ""])
 
     @classmethod
     def from_extra_config(cls, extra: dict) -> "PeerCacheConfig":
@@ -114,6 +131,7 @@ class PeerCacheConfig:
             "discovery_addr",
             "protocol",
             "device_name",
+            "device_names",
             "ib_port",
             "gid_index",
             "max_channels_per_peer",

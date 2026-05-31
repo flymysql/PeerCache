@@ -28,8 +28,16 @@ from typing import List, Optional, Tuple
 @dataclass
 class Mr:
     addr: int
-    rkey: int
-    lkey: int
+    rkey: int           # rail-0 remote key (back-compat)
+    lkey: int           # rail-0 local key (back-compat)
+    rkeys: List[int] = None  # per-rail remote keys (len == n_rails)
+    lkeys: List[int] = None  # per-rail local keys
+
+    def __post_init__(self):
+        if self.rkeys is None:
+            self.rkeys = [self.rkey]
+        if self.lkeys is None:
+            self.lkeys = [self.lkey]
 
 
 @dataclass
@@ -71,6 +79,38 @@ class Transport:
         ]
         return self.batch_read(ops)
 
+    def n_rails(self) -> int:
+        return 1
+
+    def local_endpoints(self) -> List[str]:
+        return [self.local_endpoint()]
+
+    def batch_read_multi(
+        self,
+        node_ids: List[str],
+        local_addrs: List[int],
+        remote_addrs: List[int],
+        lengths: List[int],
+        rail_endpoints: dict,
+        rail_rkeys: dict,
+    ) -> List[bool]:
+        """Multi-rail striped read. Op i uses rail (i % n_rails) of its owner.
+
+        Default (single-rail) builds ReadOps against rail 0 and delegates."""
+        N = max(1, self.n_rails())
+        nodes: List[str] = []
+        for i, node in enumerate(node_ids):
+            eps = rail_endpoints.get(node) or []
+            rail = i % N if (i % N) < len(eps) else 0
+            nodes.append(eps[rail] if eps else "")
+        # rkeys per op selected on the same rail.
+        rks: List[int] = []
+        for i, node in enumerate(node_ids):
+            ks = rail_rkeys.get(node) or [0]
+            rail = i % N if (i % N) < len(ks) else 0
+            rks.append(ks[rail] if ks else 0)
+        return self.batch_read_v(nodes, local_addrs, remote_addrs, rks, lengths)
+
     def local_endpoint(self) -> str:  # pragma: no cover
         raise NotImplementedError
 
@@ -84,8 +124,9 @@ class RdmaTransport(Transport):
 
         if not getattr(_peercache, "HAS_RDMA", False):
             raise RuntimeError("peercache: _peercache built without RDMA support")
+        devices = config.device_rails() if hasattr(config, "device_rails") else [config.device_name]
         self._engine = _peercache.TransferEngine(
-            device_name=config.device_name,
+            device_names=devices,
             ib_port=config.ib_port,
             gid_index=config.gid_index,
             bind_host=config.local_hostname,
@@ -94,9 +135,14 @@ class RdmaTransport(Transport):
         )
         self._ReadRequest = _peercache.ReadRequest
 
+    def n_rails(self) -> int:
+        return int(self._engine.n_rails())
+
     def register_mr(self, addr: int, length: int) -> Mr:
-        h = self._engine.register_mr(addr, length)
-        return Mr(addr=h.addr, rkey=h.rkey, lkey=h.lkey)
+        handles = self._engine.register_mr(addr, length)  # one per rail
+        rkeys = [h.rkey for h in handles]
+        lkeys = [h.lkey for h in handles]
+        return Mr(addr=addr, rkey=rkeys[0], lkey=lkeys[0], rkeys=rkeys, lkeys=lkeys)
 
     def deregister_mr(self, addr: int) -> None:
         self._engine.deregister_mr(addr)
@@ -120,8 +166,18 @@ class RdmaTransport(Transport):
         return list(self._engine.batch_read_v(
             remote_nodes, local_addrs, remote_addrs, rkeys, lengths))
 
+    def batch_read_multi(self, node_ids, local_addrs, remote_addrs, lengths,
+                         rail_endpoints, rail_rkeys):
+        # Stripe across all rails inside one GIL-released C++ call.
+        return list(self._engine.batch_read_multi(
+            node_ids, local_addrs, remote_addrs, lengths,
+            rail_endpoints, rail_rkeys))
+
     def local_endpoint(self) -> str:
         return self._engine.local_endpoint()
+
+    def local_endpoints(self) -> List[str]:
+        return list(self._engine.local_endpoints())
 
 
 # --------------------------------------------------------------------------- #
@@ -157,14 +213,26 @@ class TcpTransport(Transport):
         self._pool_lock = threading.Lock()
         self._max_idle = max(1, getattr(config, "max_channels_per_peer", 16))
 
-        self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self._sock.bind((config.rdma_bind_host, config.rdma_port))
-        self._sock.listen(128)
-        _, port = self._sock.getsockname()
-        self._endpoint = f"{config.local_hostname}:{port}"
+        # Multi-rail: one listener per "rail" (mirrors the RDMA per-device rails
+        # so the multi-rail read path is exercisable over TCP). All rails serve
+        # the same process memory, so any rail can satisfy any read.
+        n_rails = len(config.device_rails()) if hasattr(config, "device_rails") else 1
+        n_rails = max(1, n_rails)
+        self._socks: List[socket.socket] = []
+        self._endpoints: List[str] = []
+        for _ in range(n_rails):
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            s.bind((config.rdma_bind_host, 0))
+            s.listen(128)
+            _, port = s.getsockname()
+            self._socks.append(s)
+            self._endpoints.append(f"{config.local_hostname}:{port}")
+        self._sock = self._socks[0]
+        self._endpoint = self._endpoints[0]
         self._running = True
-        threading.Thread(target=self._serve_loop, daemon=True).start()
+        for s in self._socks:
+            threading.Thread(target=self._serve_loop, args=(s,), daemon=True).start()
 
     def register_mr(self, addr: int, length: int) -> Mr:
         with self._lock:
@@ -182,10 +250,10 @@ class TcpTransport(Transport):
                     return True
         return False
 
-    def _serve_loop(self) -> None:
+    def _serve_loop(self, sock: socket.socket) -> None:
         while self._running:
             try:
-                conn, _ = self._sock.accept()
+                conn, _ = sock.accept()
             except OSError:
                 break
             threading.Thread(target=self._serve_conn, args=(conn,), daemon=True).start()
@@ -258,12 +326,19 @@ class TcpTransport(Transport):
     def local_endpoint(self) -> str:
         return self._endpoint
 
+    def local_endpoints(self) -> List[str]:
+        return list(self._endpoints)
+
+    def n_rails(self) -> int:
+        return len(self._endpoints)
+
     def close(self) -> None:
         self._running = False
-        try:
-            self._sock.close()
-        except Exception:
-            pass
+        for s in getattr(self, "_socks", [self._sock]):
+            try:
+                s.close()
+            except Exception:
+                pass
         with self._pool_lock:
             for socks in self._idle.values():
                 for s in socks:
