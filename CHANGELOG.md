@@ -4,7 +4,7 @@ All notable changes to PeerCache are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.2.0] - 2026-05-31
 
 ### Added
 - **Disk persistence tier (L4)**: published pages are written through to disk
@@ -59,5 +59,6 @@ Initial release.
   lightweight TCP RPC.
 - MkDocs SDK documentation site and GitHub Actions for CI, docs, and release.
 
+[0.2.0]: https://github.com/flymysql/PeerCache/releases/tag/v0.2.0
 [0.1.1]: https://github.com/flymysql/PeerCache/releases/tag/v0.1.1
 [0.1.0]: https://github.com/flymysql/PeerCache/releases/tag/v0.1.0
