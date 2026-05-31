@@ -1,6 +1,9 @@
-"""Launch the PeerCache meta (discovery) node.
+"""Launch a standalone PeerCache meta (discovery) node.
 
-The meta node does service discovery only -- it holds no metadata and no data.
+This is OPTIONAL. Normally the meta service is embedded: the PeerCache node whose
+IP matches `discovery_addr` auto-hosts discovery in-process, so you do not need a
+separate process. Use this only if you want a dedicated discovery host that does
+not serve SGLang. It does service discovery only -- no metadata and no data.
 
     python -m peercache.examples.launch_meta --bind 0.0.0.0:9100
 """

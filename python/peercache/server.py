@@ -13,11 +13,12 @@ The PeerCacheStore uses this runtime; it is also usable standalone in tests.
 from __future__ import annotations
 
 import logging
+import socket
 from typing import List, Optional
 
 from peercache.config import PeerCacheConfig
 from peercache.directory import DirectoryClient, DirectoryServer
-from peercache.discovery import DiscoveryClient
+from peercache.discovery import DiscoveryClient, DiscoveryServer
 from peercache.hashring import ConsistentHashRing
 from peercache.rpc import RpcServer
 from peercache.transport import Transport, create_transport
@@ -26,9 +27,68 @@ from peercache.types import NodeInfo
 logger = logging.getLogger(__name__)
 
 
+def _local_ip_set(local_hostname: str) -> set:
+    """Best-effort set of addresses that identify this host."""
+    ips = {"127.0.0.1", "0.0.0.0", "::1", "localhost", local_hostname}
+    try:
+        hostname = socket.gethostname()
+        ips.add(hostname)
+        ips.add(socket.gethostbyname(hostname))
+        for info in socket.getaddrinfo(hostname, None):
+            ips.add(info[4][0])
+    except Exception:
+        pass
+    return ips
+
+
+def host_is_self(host: str, local_hostname: str) -> bool:
+    """True if `host` refers to this node (so it should host the meta service)."""
+    if host in ("127.0.0.1", "0.0.0.0", "::1", "localhost"):
+        return True
+    local = _local_ip_set(local_hostname)
+    if host in local:
+        return True
+    try:
+        if socket.gethostbyname(host) in local:
+            return True
+    except Exception:
+        pass
+    return False
+
+
 class NodeRuntime:
     def __init__(self, config: PeerCacheConfig, transport: Optional[Transport] = None):
         self.config = config
+
+        # Embedded meta: there is no separate meta node. The node whose IP matches
+        # `discovery_addr` automatically hosts the discovery service. Start it
+        # before anything else so this node (and peers) can register against it.
+        self._meta_server: Optional[DiscoveryServer] = None
+        disc_host, disc_port = config.discovery_addr.rsplit(":", 1)
+        if host_is_self(disc_host, config.local_hostname):
+            # This node is the designated meta. If the port is already bound,
+            # another local node already hosts it (e.g. several SGLang ranks on
+            # one box, or an externally-launched meta) -> just act as a client.
+            try:
+                self._meta_server = DiscoveryServer(
+                    config.meta_bind_host, int(disc_port), member_ttl=config.member_ttl
+                )
+                self._meta_server.start()
+                logger.info(
+                    "This node hosts the embedded PeerCache meta/discovery service "
+                    "on %s:%s (discovery_addr=%s resolves to self)",
+                    config.meta_bind_host,
+                    disc_port,
+                    config.discovery_addr,
+                )
+            except OSError:
+                self._meta_server = None
+                logger.info(
+                    "Embedded meta port %s already bound; another local node hosts "
+                    "the discovery service. Acting as a client.",
+                    disc_port,
+                )
+
         self.transport: Transport = transport or create_transport(config)
 
         # Control-plane RPC server (hosts the directory shard).
@@ -70,6 +130,12 @@ class NodeRuntime:
         self.discovery.stop()
         self._rpc.stop()
         self.transport.close()
+        if self._meta_server is not None:
+            self._meta_server.stop()
+
+    @property
+    def is_meta(self) -> bool:
+        return self._meta_server is not None
 
     @property
     def node_id(self) -> str:

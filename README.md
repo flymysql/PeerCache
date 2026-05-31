@@ -11,8 +11,9 @@ Docs: <https://flymysql.github.io/PeerCache/>
 PeerCache gives you Mooncake-style RDMA zero-copy KV-cache sharing across nodes,
 but **without** the centralized `master` + `metadata` services. Instead it uses:
 
-- **One meta node for service discovery only** — nodes register their endpoint,
-  heartbeat, and pull the live membership list.
+- **Embedded service discovery** — no separate meta process. One node (chosen by
+  `discovery_addr`) auto-hosts the discovery service in-process; nodes register
+  their endpoint, heartbeat, and pull the live membership list.
 - **A consistent-hash distributed directory (DHT)** — the mapping
   `key -> {data_node, remote_addr, rkey, length}` is sharded across all nodes by
   hashing the key. There is no central metadata store.
@@ -72,16 +73,21 @@ pip install -e . --config-settings=cmake.define.PEERCACHE_NO_RDMA=ON
 
 ## Run with SGLang
 
-```bash
-# 1. start the meta (discovery) node somewhere reachable
-python -m peercache.examples.launch_meta --bind 0.0.0.0:9100
+The meta service is **embedded** — there is no separate meta process. Point
+`discovery_addr` at one node's IP on every node; the node whose IP matches
+auto-starts the discovery service in-process.
 
-# 2. launch each SGLang server with the dynamic backend
+```bash
+# On every SGLang node, set discovery_addr to the SAME node's IP (say node-0).
+# node-0 detects the IP is itself and hosts the embedded meta automatically.
 python -m sglang.launch_server --enable-hierarchical-cache \
   --hicache-storage-backend dynamic \
   --hicache-storage-backend-extra-config \
-  '{"backend_name":"peercache","module_path":"peercache.store","class_name":"PeerCacheStore","discovery_addr":"META_IP:9100","protocol":"rdma","device_name":"mlx5_0","global_segment_size":"4gb"}'
+  '{"backend_name":"peercache","module_path":"peercache.store","class_name":"PeerCacheStore","discovery_addr":"NODE0_IP:9100","protocol":"rdma","device_name":"mlx5_0","global_segment_size":"4gb"}'
 ```
+
+(Optionally, you can still run a standalone meta with `peercache-meta --bind
+0.0.0.0:9100` if you prefer a dedicated discovery host.)
 
 See [examples/sglang_launch.md](examples/sglang_launch.md) for details.
 

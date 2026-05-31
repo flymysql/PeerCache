@@ -45,6 +45,10 @@ class PeerCacheConfig:
     control_bind_host: str = "0.0.0.0"
     control_port: int = 0
 
+    # Embedded meta: the node whose IP equals discovery_addr auto-hosts the
+    # discovery service, bound on this interface.
+    meta_bind_host: str = "0.0.0.0"
+
     # Node identity; auto-generated if not provided.
     node_id: str = ""
 
@@ -81,6 +85,7 @@ class PeerCacheConfig:
             "rdma_port",
             "control_bind_host",
             "control_port",
+            "meta_bind_host",
             "node_id",
             "heartbeat_interval",
             "member_ttl",

@@ -19,15 +19,19 @@ pip install -e /path/to/peercache \
 
 PeerCache must be importable from the SGLang process (`python -c "import peercache"`).
 
-## 2. Start the meta (discovery) node
+## 2. Choose the discovery host (embedded meta)
 
-Pick one reachable host. It does service discovery only (no data, no metadata).
+There is **no separate meta process**. Pick one node to host service discovery and
+put its IP in `discovery_addr` on *every* node. That node detects its own IP at
+startup and auto-hosts the discovery service in-process (no data, no metadata
+there — discovery only); all other nodes connect to it as clients.
 
-```bash
-python -m peercache.examples.launch_meta --bind 0.0.0.0:9100
-```
+> Optional dedicated host: if you prefer a node that does not serve SGLang, run
+> `peercache-meta --bind 0.0.0.0:9100` there and point `discovery_addr` at it.
 
 ## 3. Launch each SGLang server
+
+Use the **same** `discovery_addr` on all nodes.
 
 ```bash
 python -m sglang.launch_server \
@@ -38,7 +42,7 @@ python -m sglang.launch_server \
     "backend_name": "peercache",
     "module_path":  "peercache.store",
     "class_name":   "PeerCacheStore",
-    "discovery_addr": "META_IP:9100",
+    "discovery_addr": "NODE0_IP:9100",
     "protocol": "rdma",
     "device_name": "mlx5_0",
     "ib_port": 1,
@@ -62,7 +66,8 @@ You may also pass the config from a file by prefixing the path with `@`:
 | `backend_name` | — | must be `peercache` (required by the dynamic factory) |
 | `module_path` | — | `peercache.store` (required) |
 | `class_name` | — | `PeerCacheStore` (required) |
-| `discovery_addr` | — | meta node `host:port` (**required**) |
+| `discovery_addr` | — | discovery host `host:port`, same on all nodes; the matching node auto-hosts meta (**required**) |
+| `meta_bind_host` | `0.0.0.0` | interface the embedded meta binds when this node is the discovery host |
 | `protocol` | `rdma` | `rdma` or `tcp` (fallback transport) |
 | `device_name` | `""` | RDMA device, e.g. `mlx5_0`; empty = first active |
 | `ib_port` | `1` | HCA port |

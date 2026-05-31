@@ -7,10 +7,8 @@ but **without** the centralized `master` + `metadata` services.
 
 ```mermaid
 flowchart LR
-    subgraph meta [Meta node]
-      D[Discovery only:<br/>register / heartbeat / members]
-    end
-    subgraph nodeW [Node W - writer]
+    subgraph nodeW [Node W - writer / embedded meta]
+      D[Embedded discovery:<br/>register / heartbeat / members]
       PW[Published pool MR]
       DW[Directory shard]
     end
@@ -18,8 +16,7 @@ flowchart LR
       HR[Host KV buffer - recv MR]
       DR[Directory shard]
     end
-    nodeW -. register/heartbeat .-> meta
-    nodeR -. register/heartbeat .-> meta
+    nodeR -. register/heartbeat .-> D
     nodeW -->|"PUT key to hash(key) owner"| DR
     nodeR -->|"GET key from hash(key) owner"| DR
     nodeR ==>|one-sided RDMA READ| PW
@@ -31,13 +28,15 @@ flowchart LR
 |---|---|---|
 | metadata | central master + metadata service | sharded directory (consistent hash) |
 | data placement | dedicated managed pool | stays on the producing node |
-| coordination | master allocates / tracks objects | only service discovery on meta node |
+| coordination | master allocates / tracks objects | only service discovery, embedded in a node |
 | transfer | RDMA zero-copy | RDMA zero-copy (one-sided READ) |
 
 ## Core ideas
 
-- **One meta node for discovery only** — nodes register, heartbeat, and pull the
-  live membership list. No data and no metadata live there.
+- **Embedded discovery, no separate meta node** — you set `discovery_addr` to one
+  node's IP on every node; that node auto-hosts the discovery service in-process.
+  Nodes register, heartbeat, and pull the live membership list. No data and no
+  metadata live there.
 - **Consistent-hash directory (DHT)** — the mapping
   `key -> {data_node, remote_addr, rkey, length}` is sharded across all nodes by
   hashing the key.
