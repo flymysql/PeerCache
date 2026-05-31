@@ -5,6 +5,7 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <unistd.h>
 
 #include <cstdint>
@@ -15,6 +16,16 @@
 namespace peercache {
 
 namespace {
+
+// Bound the blocking bootstrap recv()/send() calls so a half-open handshake
+// (peer accepted but never replied) cannot wedge a worker thread forever.
+void set_sock_timeouts(int fd, double seconds) {
+  timeval tv;
+  tv.tv_sec = static_cast<time_t>(seconds);
+  tv.tv_usec = static_cast<suseconds_t>((seconds - tv.tv_sec) * 1e6);
+  ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+  ::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+}
 
 bool read_full(int fd, void* buf, size_t n) {
   auto* p = static_cast<uint8_t*>(buf);
@@ -125,6 +136,7 @@ void ConnectionManager::listen_loop() {
       if (!running_) break;
       continue;
     }
+    set_sock_timeouts(fd, 10.0);
     handle_inbound(fd);
     ::close(fd);
   }
@@ -189,6 +201,7 @@ std::unique_ptr<RdmaEndpoint> ConnectionManager::connect_new(
     return nullptr;
   }
   ::freeaddrinfo(res);
+  set_sock_timeouts(fd, 10.0);
 
   auto ep = std::make_unique<RdmaEndpoint>(ctx_);
   QpInfo local = ep->create();
@@ -243,6 +256,21 @@ void ConnectionManager::release(const std::string& peer, RdmaEndpoint* ep) {
   PeerPool* p = pool_for(peer);
   std::lock_guard<std::mutex> lk(p->mu);
   p->free.push_back(ep);
+  p->cv.notify_one();
+}
+
+void ConnectionManager::discard(const std::string& peer, RdmaEndpoint* ep) {
+  if (!ep) return;
+  PeerPool* p = pool_for(peer);
+  std::lock_guard<std::mutex> lk(p->mu);
+  for (auto it = p->owned.begin(); it != p->owned.end(); ++it) {
+    if (it->get() == ep) {
+      p->owned.erase(it);  // destroys the QP/CQ
+      break;
+    }
+  }
+  if (p->created > 0) --p->created;
+  // A capacity slot just freed up; wake a waiter so it can build a fresh one.
   p->cv.notify_one();
 }
 

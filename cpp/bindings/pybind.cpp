@@ -69,6 +69,10 @@ PYBIND11_MODULE(_peercache, m) {
       .def("deregister_mr", &TransferEngine::deregister_mr, py::arg("addr"))
       .def("batch_read", &TransferEngine::batch_read, py::arg("requests"),
            py::call_guard<py::gil_scoped_release>())
+      .def("batch_read_v", &TransferEngine::batch_read_v,
+           py::arg("remote_nodes"), py::arg("local_addrs"),
+           py::arg("remote_addrs"), py::arg("rkeys"), py::arg("lengths"),
+           py::call_guard<py::gil_scoped_release>())
       .def("local_endpoint", &TransferEngine::local_endpoint);
 }
 

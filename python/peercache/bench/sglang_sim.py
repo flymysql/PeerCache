@@ -21,6 +21,7 @@ This module performs no measurement; ``bench_hicache.py`` drives it.
 from __future__ import annotations
 
 import ctypes
+import logging
 import time
 from types import SimpleNamespace
 from typing import List, Optional
@@ -42,6 +43,21 @@ def _fill_template_buf(stride: int):
     return buf
 
 
+_pinned_warned = False
+
+
+def _warn_unpinned(reason: str) -> None:
+    global _pinned_warned
+    if not _pinned_warned:
+        _pinned_warned = True
+        logging.getLogger(__name__).warning(
+            "peercache-bench: host buffers are NOT page-locked (%s); reported "
+            "RDMA throughput will be lower than the hardware can do. Install "
+            "torch to use pinned memory.",
+            reason,
+        )
+
+
 def alloc_host_buffer(size: int):
     """(keepalive, base_addr). Prefer torch pinned memory for real RDMA; the
     ctypes fallback still registers fine, just not page-locked."""
@@ -50,10 +66,12 @@ def alloc_host_buffer(size: int):
 
         try:
             t = torch.empty(size, dtype=torch.uint8, pin_memory=True)
-        except Exception:
+        except Exception as e:
+            _warn_unpinned(f"torch pin_memory failed: {e}")
             t = torch.empty(size, dtype=torch.uint8)
         return t, t.data_ptr()
     except Exception:
+        _warn_unpinned("torch not available")
         buf = (ctypes.c_byte * size)()
         return buf, ctypes.addressof(buf)
 
