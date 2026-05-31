@@ -60,7 +60,7 @@ class Transport:
 
 class RdmaTransport(Transport):
     def __init__(self, config):
-        import _peercache  # built C++ extension
+        from peercache import _peercache  # built C++ extension (peercache._peercache)
 
         if not getattr(_peercache, "HAS_RDMA", False):
             raise RuntimeError("peercache: _peercache built without RDMA support")

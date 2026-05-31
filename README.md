@@ -1,6 +1,12 @@
 # PeerCache
 
+[![CI](https://github.com/flymysql/PeerCache/actions/workflows/ci.yml/badge.svg)](https://github.com/flymysql/PeerCache/actions/workflows/ci.yml)
+[![Docs](https://github.com/flymysql/PeerCache/actions/workflows/docs.yml/badge.svg)](https://flymysql.github.io/PeerCache/)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+
 A lightweight, peer-to-peer **L3 storage backend for SGLang HiCache**.
+
+Docs: <https://flymysql.github.io/PeerCache/>
 
 PeerCache gives you Mooncake-style RDMA zero-copy KV-cache sharing across nodes,
 but **without** the centralized `master` + `metadata` services. Instead it uses:
@@ -85,3 +91,14 @@ See [examples/sglang_launch.md](examples/sglang_launch.md) for details.
 pip install pytest
 PYTHONPATH=python pytest tests/ -v
 ```
+
+## Maintainer setup (one-time)
+
+- **GitHub Pages**: Settings → Pages → Build and deployment → Source = **GitHub
+  Actions**. The `Docs` workflow then publishes to
+  <https://flymysql.github.io/PeerCache/> on every push to `main`.
+- **PyPI Trusted Publishing**: on the PyPI `peercache` project, add a GitHub
+  publisher (owner `flymysql`, repo `PeerCache`, workflow `release.yml`,
+  environment `pypi`). Tagging `vX.Y.Z` then builds the sdist, attaches it to a
+  GitHub Release, and publishes to PyPI. Until configured, the PyPI step is
+  non-blocking and the GitHub Release still ships the package.

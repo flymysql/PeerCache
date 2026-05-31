@@ -50,9 +50,11 @@ jobs:
     name: Publish to PyPI (trusted publishing)
     needs: build-sdist
     runs-on: ubuntu-latest
-    # PyPI Trusted Publisher must be configured for this repo/workflow.
-    # See docs/getting-started.md and the project README. This job is isolated,
-    # so a missing PyPI config does not block the GitHub Release.
+    # PyPI Trusted Publisher must be configured for this repo/workflow first
+    # (PyPI project -> Publishing -> add GitHub publisher: flymysql/PeerCache,
+    # workflow release.yml, environment pypi). Until then this step fails; it is
+    # marked continue-on-error so it never blocks the release or the build.
+    continue-on-error: true
     environment:
       name: pypi
       url: https://pypi.org/project/peercache/

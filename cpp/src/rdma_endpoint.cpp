@@ -1,7 +1,7 @@
 #include "peercache/rdma_endpoint.h"
 
-#include <cstdlib>
 #include <cstring>
+#include <random>
 
 namespace peercache {
 
@@ -45,7 +45,8 @@ QpInfo RdmaEndpoint::create() {
     throw std::runtime_error("peercache: modify_qp INIT failed");
   }
 
-  psn_ = lrand48() & 0xffffff;
+  static thread_local std::mt19937 rng(std::random_device{}());
+  psn_ = rng() & 0xffffff;
 
   QpInfo info;
   info.qp_num = qp_->qp_num;
