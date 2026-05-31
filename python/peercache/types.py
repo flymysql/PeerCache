@@ -51,6 +51,10 @@ class DataLocation:
     remote_addr: int  # virtual address inside that node's published-pool MR
     rkey: int  # remote key for that MR
     length: int  # bytes
+    # When False the page has been evicted from the pool and only lives on the
+    # owner's disk tier; remote_addr/rkey are invalid until the owner promotes
+    # it back into the pool (see PeerCacheStore._ensure_resident).
+    resident: bool = True
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -63,4 +67,5 @@ class DataLocation:
             remote_addr=int(d["remote_addr"]),
             rkey=int(d["rkey"]),
             length=int(d["length"]),
+            resident=bool(d.get("resident", True)),
         )

@@ -37,6 +37,7 @@ class PublishedPool:
         self._next_offset = 0
         self._free: Dict[int, List[int]] = {}  # length -> [free offsets]
         self._entries: "OrderedDict[str, Tuple[int, int]]" = OrderedDict()
+        self._used = 0
         self._lock = threading.Lock()
 
     @property
@@ -46,6 +47,15 @@ class PublishedPool:
     @property
     def base_addr(self) -> int:
         return self._base
+
+    @property
+    def capacity(self) -> int:
+        return self._capacity
+
+    @property
+    def bytes_used(self) -> int:
+        with self._lock:
+            return self._used
 
     def __contains__(self, key: str) -> bool:
         with self._lock:
@@ -82,6 +92,7 @@ class PublishedPool:
         # Evict LRU pages until a matching-size slot frees up.
         while self._entries:
             old_key, (old_off, old_len) = self._entries.popitem(last=False)
+            self._used -= old_len
             evicted.append(old_key)
             self._free.setdefault(old_len, []).append(old_off)
             if old_len == length:
@@ -108,6 +119,7 @@ class PublishedPool:
                 ctypes.memmove(self._base + off, src_ptr, length)
                 self._entries[key] = (off, length)
                 self._entries.move_to_end(key)
+                self._used += length
                 remote_addr = self._base + off
         if evicted and self._on_evict is not None:
             self._on_evict(evicted)
@@ -118,4 +130,5 @@ class PublishedPool:
             entry = self._entries.pop(key, None)
             if entry is not None:
                 off, length = entry
+                self._used -= length
                 self._free.setdefault(length, []).append(off)

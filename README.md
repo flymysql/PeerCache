@@ -24,6 +24,11 @@ but **without** the centralized `master` + `metadata` services. Instead it uses:
   location record to the directory.
 - **One-sided RDMA READ on read** — `get()` looks up the directory, then issues a
   zero-copy `IBV_WR_RDMA_READ` straight into SGLang's registered host buffer.
+- **Disk persistence tier (L4)** — pages evicted from memory spill to disk
+  (default `/data/peercache/`, `100GB`) and are promoted back into the pool on a
+  later read (locally or by a remote reader).
+- **Built-in monitoring** — Prometheus `/metrics` + an embedded HTML dashboard
+  (default port `31997`): hit rate, throughput, latency p50/p99, mem/disk usage.
 
 ```
 write:  set() ── local memcpy ──> published pool MR

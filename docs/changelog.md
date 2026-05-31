@@ -2,6 +2,21 @@
 
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- **Disk persistence tier (L4)**: published pages spill to disk (`disk_path`,
+  default `/data/peercache/`, capped by `disk_size`, default `100GB`). Evicted
+  pages stay in the directory as non-resident and are promoted back into the pool
+  on a later read (locally, or on the owner via a `data_promote` RPC for remote
+  readers); `exists` hits trigger a best-effort prefetch.
+- **Metrics + monitoring**: Prometheus `/metrics` endpoint and an embedded HTML
+  dashboard (default port `31997`) for hit rate, throughput, latency p50/p99,
+  and memory/disk usage.
+
+### Changed
+- `DataLocation` gains a `resident` flag for disk-resident pages.
+
 ## [0.1.1] - 2026-05-31
 
 ### Changed

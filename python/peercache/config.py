@@ -20,6 +20,15 @@ def _parse_size(value) -> int:
     return int(s)
 
 
+def _as_bool(value) -> bool:
+    """Parse JSON/string/int booleans (extra_config values may be strings)."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
 @dataclass
 class PeerCacheConfig:
     # Service discovery (meta node) "host:port".
@@ -49,6 +58,18 @@ class PeerCacheConfig:
     # discovery service, bound on this interface.
     meta_bind_host: str = "0.0.0.0"
 
+    # Disk persistence tier (L4): published pages also spill to disk so they can
+    # be promoted back into the pool (and read remotely) after LRU eviction.
+    disk_enabled: bool = True
+    disk_path: str = "/data/peercache/"
+    disk_size: int = 100 << 30  # accepts int or "100gb"/"512mb"
+
+    # Metrics / monitoring. Exposes Prometheus /metrics and an embedded dashboard.
+    metrics_enabled: bool = True
+    metrics_bind_host: str = "0.0.0.0"
+    metrics_port: int = 31997
+    metrics_dashboard: bool = True  # serve the built-in HTML dashboard at "/"
+
     # Node identity; auto-generated if not provided.
     node_id: str = ""
 
@@ -62,6 +83,10 @@ class PeerCacheConfig:
         if not self.node_id:
             self.node_id = f"{self.local_hostname}-{uuid.uuid4().hex[:8]}"
         self.global_segment_size = _parse_size(self.global_segment_size)
+        self.disk_size = _parse_size(self.disk_size)
+        self.disk_enabled = _as_bool(self.disk_enabled)
+        self.metrics_enabled = _as_bool(self.metrics_enabled)
+        self.metrics_dashboard = _as_bool(self.metrics_dashboard)
 
     @classmethod
     def from_extra_config(cls, extra: dict) -> "PeerCacheConfig":
@@ -86,6 +111,13 @@ class PeerCacheConfig:
             "control_bind_host",
             "control_port",
             "meta_bind_host",
+            "disk_enabled",
+            "disk_path",
+            "disk_size",
+            "metrics_enabled",
+            "metrics_bind_host",
+            "metrics_port",
+            "metrics_dashboard",
             "node_id",
             "heartbeat_interval",
             "member_ttl",

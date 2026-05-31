@@ -120,9 +120,26 @@ RDMA / 传输：
 
 | 键 | 默认值 | 含义 |
 |---|---|---|
-| `global_segment_size` | `4gb` | 每节点发布池大小（接受 `int` 或 `"8gb"`/`"512mb"`；按 `tp_size` 切分） |
+| `global_segment_size` | `4gb` | 每节点发布池（内存）大小（接受 `int` 或 `"8gb"`/`"512mb"`；按 `tp_size` 切分） |
 | `vnodes` | `160` | 一致性哈希环上每节点的虚拟节点数 |
 | `directory_replicas` | `1` | `> 1` 时把目录条目复制到 N 个归属者以实现高可用 |
+
+磁盘持久化分层（L4）：
+
+| 键 | 默认值 | 含义 |
+|---|---|---|
+| `disk_enabled` | `true` | 把被淘汰的页面落盘，并在读取时提升回内存（若 `disk_path` 无法创建则优雅降级） |
+| `disk_path` | `/data/peercache/` | 数据落盘目录（每个节点使用一个 `node_id` 子目录） |
+| `disk_size` | `100gb` | 每节点磁盘容量（按 LRU 约束；接受 `int` 或 `"100gb"`） |
+
+监控（metrics + 可视化页面）：
+
+| 键 | 默认值 | 含义 |
+|---|---|---|
+| `metrics_enabled` | `true` | 启动 metrics 服务（Prometheus `/metrics` + 可视化页面） |
+| `metrics_port` | `31997` | metrics/可视化 HTTP 端口（若已被占用，例如同机多 rank，则自动禁用） |
+| `metrics_bind_host` | `0.0.0.0` | metrics 服务绑定接口 |
+| `metrics_dashboard` | `true` | 同时在 `/` 提供内置 HTML 可视化页面 |
 
 网络 / 身份（一般无需修改）：
 
@@ -137,6 +154,24 @@ RDMA / 传输：
 | `node_id` | 自动 | 稳定的节点标识；由 `local_hostname` + 随机后缀自动生成 |
 | `heartbeat_interval` | `2.0` | 成员心跳间隔（秒） |
 | `member_ttl` | `6.0` | meta 将静默节点剔除前的等待秒数 |
+
+## 持久化与监控
+
+开启磁盘分层后（默认开启），每个节点会把发布的页面落盘到
+`disk_path/<node_id>/`，并在读取时提升回内存，因此有效容量约等于内存
+（`global_segment_size`）+ 磁盘（`disk_size`）。详见[架构](architecture.md)。
+
+每个节点默认还会提供 metrics：
+
+```bash
+# Prometheus 抓取目标
+curl http://NODE_IP:31997/metrics
+# 浏览器打开内置可视化页面
+open http://NODE_IP:31997/
+```
+
+把 Prometheus 指向 `NODE_IP:31997`（或抓取每个节点）即可绘制命中率、吞吐、时延
+p50/p99 以及内存/磁盘用量。详见[架构](architecture.md)。
 
 ## TCP 回退（无 RDMA）
 

@@ -135,6 +135,42 @@ pool.address_of(key)              # (remote_addr, length) | None
 pool.remove(key)
 ```
 
+## `peercache.diskstore.DiskStore`
+
+The L4 disk tier: async write-through, LRU-bounded capacity, restart-safe index.
+
+```python
+from peercache.diskstore import DiskStore
+
+d = DiskStore("/data/peercache", max_bytes=100 << 30,
+              on_evict=lambda keys: None, node_id="node-0")
+d.put("key", b"...page bytes...")     # async write-through (idempotent)
+d.get("key")                          # bytes | None (moves to MRU)
+d.exists("key")                       # bool
+used_bytes, num_keys = d.stats()
+d.remove("key"); d.close()
+```
+
+## `peercache.metrics`
+
+```python
+from peercache.metrics import Metrics, MetricsServer
+
+m = Metrics(node_id="node-0")
+m.record_read(hit=True, nbytes=4096, seconds=0.0003, source="remote")  # local/remote/disk
+m.record_write(nbytes=4096, seconds=0.0002)
+m.set_gauge_provider("pool_bytes_used", lambda: pool.bytes_used)
+text = m.render_prometheus()          # Prometheus exposition
+
+srv = MetricsServer(m, "0.0.0.0", 31997, dashboard=True)
+srv.start()                           # GET /metrics, GET / (dashboard), GET /healthz
+srv.stop()
+```
+
+`PeerCacheStore` wires these automatically: it spills to a `DiskStore`, registers
+pool/disk/membership gauges, and runs a `MetricsServer` (see `extra_config` keys
+`disk_*` and `metrics_*`).
+
 ## `peercache.types`
 
 - `DataLocation(node_id, rdma_endpoint, remote_addr, rkey, length)` — a directory

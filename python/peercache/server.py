@@ -91,8 +91,10 @@ class NodeRuntime:
 
         self.transport: Transport = transport or create_transport(config)
 
-        # Control-plane RPC server (hosts the directory shard).
+        # Control-plane RPC server (hosts the directory shard). Exposed as
+        # `control_rpc` so the store can register data-plane handlers (promote).
         self._rpc = RpcServer(config.control_bind_host, config.control_port)
+        self.control_rpc = self._rpc
         self.directory_server = DirectoryServer()
         self.directory_server.attach(self._rpc)
         control_port = self._rpc.start()

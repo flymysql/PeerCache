@@ -125,9 +125,26 @@ Capacity / placement:
 
 | key | default | meaning |
 |---|---|---|
-| `global_segment_size` | `4gb` | published-pool size per node (accepts `int` or `"8gb"`/`"512mb"`; sliced across `tp_size`) |
+| `global_segment_size` | `4gb` | published-pool (memory) size per node (accepts `int` or `"8gb"`/`"512mb"`; sliced across `tp_size`) |
 | `vnodes` | `160` | virtual nodes per node on the consistent-hash ring |
 | `directory_replicas` | `1` | replicate directory entries to N owners for HA when `> 1` |
+
+Disk persistence tier (L4):
+
+| key | default | meaning |
+|---|---|---|
+| `disk_enabled` | `true` | spill evicted pages to disk and promote them back on read (degrades gracefully if `disk_path` can't be created) |
+| `disk_path` | `/data/peercache/` | data directory (each node uses a `node_id` subdir) |
+| `disk_size` | `100gb` | disk capacity per node (LRU-bounded; accepts `int` or `"100gb"`) |
+
+Monitoring (metrics + dashboard):
+
+| key | default | meaning |
+|---|---|---|
+| `metrics_enabled` | `true` | run the metrics server (Prometheus `/metrics` + dashboard) |
+| `metrics_port` | `31997` | metrics/dashboard HTTP port (disabled if already bound, e.g. co-located ranks) |
+| `metrics_bind_host` | `0.0.0.0` | metrics server bind interface |
+| `metrics_dashboard` | `true` | also serve the built-in HTML dashboard at `/` |
 
 Networking / identity (rarely need changing):
 
@@ -142,6 +159,26 @@ Networking / identity (rarely need changing):
 | `node_id` | auto | stable node identifier; auto-generated from `local_hostname` + random suffix |
 | `heartbeat_interval` | `2.0` | seconds between membership heartbeats |
 | `member_ttl` | `6.0` | seconds before a silent node is pruned by the meta |
+
+## Persistence and monitoring
+
+With the disk tier on (default), each node spills published pages to
+`disk_path/<node_id>/` and promotes them back on read, so capacity is effectively
+memory (`global_segment_size`) + disk (`disk_size`). See
+[Architecture → Disk persistence tier](architecture.md#disk-persistence-tier-l4).
+
+Each node also serves metrics by default:
+
+```bash
+# Prometheus scrape target
+curl http://NODE_IP:31997/metrics
+# Built-in dashboard in a browser
+open http://NODE_IP:31997/
+```
+
+Point Prometheus at `NODE_IP:31997` (or scrape every node) to chart hit rate,
+throughput, latency p50/p99, and pool/disk usage. See
+[Architecture → Monitoring](architecture.md#monitoring-metrics-dashboard).
 
 ## TCP fallback (no RDMA)
 
