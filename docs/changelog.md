@@ -2,6 +2,18 @@
 
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+- **Embedded meta**: removed the requirement for a separate meta process. The
+  node whose IP equals `discovery_addr` now auto-hosts the discovery service
+  in-process; co-located nodes that cannot bind the port fall back to client
+  mode automatically.
+
+### Added
+- Bilingual (English / 中文) documentation with a language switcher
+  (`mkdocs-static-i18n`).
+
 ## [0.1.0] - 2026-05-31
 
 Initial release.

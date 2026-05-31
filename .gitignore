@@ -11,3 +11,6 @@ venv/
 *.obj
 CMakeCache.txt
 CMakeFiles/
+site/
+.cache/
+_skbuild/

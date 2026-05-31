@@ -26,22 +26,28 @@ PeerCache must be importable from the SGLang process:
 python -c "import peercache; print(peercache.__version__)"
 ```
 
-## 1. Start the meta (discovery) node
+## 1. Pick the discovery host (embedded meta)
 
-Pick one reachable host. It does service discovery only.
+There is **no separate meta process to launch**. Choose one node to host service
+discovery and set `discovery_addr` to that node's IP on *every* node. The node
+whose IP matches `discovery_addr` detects this at startup and auto-hosts the
+discovery service in-process; all other nodes connect to it as clients.
 
-```bash
-python -m peercache.examples.launch_meta --bind 0.0.0.0:9100
-# or, via the console script:
-peercache-meta --bind 0.0.0.0:9100
-```
+So the only decision here is: which node's IP goes into `discovery_addr`.
+
+> Optional: if you'd rather run a dedicated discovery host (e.g. a node that does
+> not serve SGLang), start one with `peercache-meta --bind 0.0.0.0:9100` and point
+> `discovery_addr` at it. The embedded behavior is unaffected — whichever node's
+> IP equals `discovery_addr` and is free to bind the port will host it.
 
 ## 2. Launch SGLang with the PeerCache backend
 
 PeerCache plugs in through SGLang's **dynamic backend** mechanism — no SGLang
-source changes required.
+source changes required. Use the **same** `discovery_addr` on all nodes.
 
 ```bash
+# On the chosen discovery node, NODE0_IP is its own IP -> it hosts meta in-process.
+# On every other node, the same NODE0_IP just points them at NODE0.
 python -m sglang.launch_server \
   --model-path <model> \
   --enable-hierarchical-cache \
@@ -50,7 +56,7 @@ python -m sglang.launch_server \
     "backend_name": "peercache",
     "module_path":  "peercache.store",
     "class_name":   "PeerCacheStore",
-    "discovery_addr": "META_IP:9100",
+    "discovery_addr": "NODE0_IP:9100",
     "protocol": "rdma",
     "device_name": "mlx5_0",
     "ib_port": 1,
@@ -66,7 +72,8 @@ python -m sglang.launch_server \
 | `backend_name` | — | must be `peercache` (required by the dynamic factory) |
 | `module_path` | — | `peercache.store` (required) |
 | `class_name` | — | `PeerCacheStore` (required) |
-| `discovery_addr` | — | meta node `host:port` (**required**) |
+| `discovery_addr` | — | discovery host `host:port`, same on all nodes; the matching node auto-hosts meta (**required**) |
+| `meta_bind_host` | `0.0.0.0` | interface the embedded meta binds when this node is the discovery host |
 | `protocol` | `rdma` | `rdma` or `tcp` (fallback transport) |
 | `device_name` | `""` | RDMA device, e.g. `mlx5_0`; empty = first active |
 | `ib_port` | `1` | HCA port |

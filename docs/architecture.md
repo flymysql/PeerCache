@@ -6,7 +6,7 @@ PeerCache splits cleanly into a **control plane** (Python) and a **data plane**
 ```mermaid
 flowchart TB
     subgraph cp [Control plane - Python, TCP]
-      DISC[Discovery: meta node]
+      DISC[Discovery: embedded meta]
       RING[Consistent-hash ring]
       DIR[Directory shard + client]
       POOL[Published pool - LRU]
@@ -87,9 +87,12 @@ local `memcpy` with no network involved.
 - **Eviction races**: pool eviction deletes the directory entry; any read that
   resolves a stale/missing entry returns a miss so SGLang recomputes (safe
   degradation).
-- **Meta node**: a single point for *discovery*. Membership is cached locally, so
-  a brief meta outage does not interrupt established reads/writes. A standby can
-  be added later.
+- **Embedded meta**: there is no dedicated meta machine. The node whose IP equals
+  `discovery_addr` auto-hosts the discovery service in-process (others connect as
+  clients). It is a single point for *discovery only*. Membership is cached
+  locally, so a brief meta outage does not interrupt established reads/writes. If
+  the discovery host dies, restart it on the same IP — established peers keep
+  serving from their cached membership in the meantime.
 - **Directory durability**: with a single replica, a node failure loses that
   shard's location records (and the data, which lived on that node anyway) — an
   acceptable cache miss. Use `directory_replicas > 1` for redundancy.
