@@ -1,6 +1,6 @@
-"""Functional smoke tests for the benchmark harness (benchmarks/).
+"""Functional smoke tests for the installed benchmark suite (peercache.bench).
 
-These keep the harness importable and runnable so it does not bit-rot. They run
+These keep the suite importable and runnable so it does not bit-rot. They run
 over the in-process TCP fallback purely for *functional* validation -- this is
 NOT a performance scenario, and the throughput/latency values are not asserted
 on (real numbers require RDMA hardware).
@@ -10,7 +10,15 @@ import argparse
 
 import pytest
 
-from common import BaselineReport, Histogram, Workload, make_result, render_hicache_markdown
+from peercache.bench.common import (
+    BaselineReport,
+    Histogram,
+    Workload,
+    make_result,
+    render_hicache_markdown,
+)
+from peercache.bench import hicache as bench_hicache
+from peercache.bench import microbench as bench_peercache
 
 
 def test_histogram_percentiles():
@@ -18,7 +26,6 @@ def test_histogram_percentiles():
     for v in range(1, 1001):  # 1..1000 microseconds
         h.record(v / 1e6)
     assert len(h) == 1000
-    # p50 ~ 500us, p99 ~ 990us, within bucket precision (~0.1%).
     assert 495 <= h.percentile_us(50) <= 505
     assert 980 <= h.percentile_us(99) <= 1000
     assert h.max_us() >= 999
@@ -54,45 +61,40 @@ def test_make_result_and_render():
     assert '"op": "get"' in rep.to_json()
 
 
-def _hicache_args(**over):
+def _hicache_args(tmp_path, **over):
     base = dict(
         protocol="tcp", device_name="", ib_port=1, gid_index=3, layout="mla",
         page_size=4096, tokens_per_page=64, batch_size=4, duration=0.3,
         warmup=0.1, working_set=32, disk=False, max_bytes=512 * 1024 * 1024,
-        out_dir="/tmp/hb_test", tag="",
+        out_dir=str(tmp_path), tag="",
     )
     base.update(over)
     return argparse.Namespace(**base)
 
 
-def test_hicache_get_runs():
-    import bench_hicache
-    rows = bench_hicache.run_get(_hicache_args(), [1, 2])
+def test_hicache_get_runs(tmp_path):
+    rows = bench_hicache.run_get(_hicache_args(tmp_path), [1, 2])
     assert len(rows) == 2
     for r in rows:
         assert r.ok and r.op == "get" and r.pages_per_s > 0
 
 
-def test_hicache_set_runs():
-    import bench_hicache
-    rows = bench_hicache.run_set(_hicache_args(), [1])
+def test_hicache_set_runs(tmp_path):
+    rows = bench_hicache.run_set(_hicache_args(tmp_path), [1])
     assert rows[0].ok and rows[0].op == "set" and rows[0].pages_per_s > 0
 
 
-def test_hicache_exists_runs():
-    import bench_hicache
-    rows = bench_hicache.run_exists(_hicache_args(), [1])
+def test_hicache_exists_runs(tmp_path):
+    rows = bench_hicache.run_exists(_hicache_args(tmp_path), [1])
     assert rows[0].ok and rows[0].op == "exists" and rows[0].pages_per_s > 0
 
 
-def test_hicache_mha_layout_runs():
-    import bench_hicache
-    rows = bench_hicache.run_get(_hicache_args(layout="mha"), [1])
+def test_hicache_mha_layout_runs(tmp_path):
+    rows = bench_hicache.run_get(_hicache_args(tmp_path, layout="mha"), [1])
     assert rows[0].ok and rows[0].pages_per_s > 0
 
 
 def test_peercache_transport_microbench_runs():
-    import bench_peercache
     wl = Workload(block_size=4096, batch_size=8, duration=0.3, warmup=0.1)
     r = bench_peercache.bench_transport_read(wl, protocol="tcp")
     assert r.ok and r.ops > 0 and r.throughput_gbps > 0
