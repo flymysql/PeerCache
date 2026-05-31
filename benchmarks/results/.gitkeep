@@ -1,3 +1,0 @@
-# Benchmark run artifacts (JSON + Markdown) are written here.
-# Results are git-ignored; commit a specific RDMA baseline by force-adding it:
-#   git add -f benchmarks/results/hicache-suite-rdma-<...>.json

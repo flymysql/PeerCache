@@ -14,14 +14,17 @@ All notable changes to PeerCache are documented here. The format is based on
   `max_channels_per_peer`, default 16). The TCP fallback gains a matching
   per-endpoint socket pool, and the control-plane RPC pool now leases a connection
   per in-flight call so directory lookups/promotes run in parallel.
-- **Benchmark harness** (`benchmarks/`): a systematic, RDMA-first benchmark
+- **Benchmark suite** (`peercache.bench`): a systematic, RDMA-first benchmark
   that drives PeerCache's `HiCacheStorage` interface exactly as SGLang HiCache
   does (PD-disaggregated `batch_set_v1` / `batch_exists` / `batch_get_v1`) via a
   faithful `mem_pool_host` simulator (MLA/MHA). Reports throughput (pages/s,
   tokens/s, GB/s) and latency tail (p50/p95/p99/p999/max) across a thread-model
   sweep, including full-load saturation/peak throughput, with `latency`,
   `throughput`, `saturation`, and `suite` modes. Memory-bounded HDR-style latency
-  histogram. Includes an optional Mooncake `transfer_engine_bench` comparison and
+  histogram. Shipped inside the package and exposed as console commands
+  (`peercache-bench`, `peercache-bench-micro`, `peercache-bench-mooncake`,
+  `peercache-bench-compare`) -- run after `pip install` with no repo clone or
+  PYTHONPATH. Includes an optional Mooncake `transfer_engine_bench` comparison and
   a low-level data-plane microbench. New `Benchmarks` docs page (EN/中文) and a
   `bench` extra. The TCP fallback is for functional smoke testing only.
 

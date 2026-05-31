@@ -16,9 +16,15 @@ dependencies = []
 test = ["pytest>=7.0"]
 # msgpack is optional; control plane falls back to JSON if it is missing.
 fast = ["msgpack>=1.0"]
+# Optional: comparison rows in the benchmark suite (Mooncake).
+bench = ["mooncake-transfer-engine"]
 
 [project.scripts]
 peercache-meta = "peercache.examples.launch_meta:main"
+peercache-bench = "peercache.bench.hicache:main"
+peercache-bench-micro = "peercache.bench.microbench:main"
+peercache-bench-mooncake = "peercache.bench.mooncake_bench:main"
+peercache-bench-compare = "peercache.bench.compare:main"
 
 [tool.scikit-build]
 # The C++ extension is optional at runtime: if libibverbs/librdmacm are missing,
@@ -31,5 +37,5 @@ build-dir = "build/{wheel_tag}"
 PEERCACHE_NO_RDMA = "OFF"
 
 [tool.pytest.ini_options]
-pythonpath = ["python", "benchmarks"]
+pythonpath = ["python"]
 testpaths = ["tests"]

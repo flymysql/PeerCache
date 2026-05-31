@@ -18,7 +18,7 @@ import time
 from types import SimpleNamespace
 from typing import List
 
-from common import Histogram, Workload, make_result, render_console, BaselineReport
+from peercache.bench.common import Histogram, Workload, make_result, render_console, BaselineReport
 
 from peercache.config import PeerCacheConfig
 from peercache.transport import ReadOp, create_transport

@@ -107,23 +107,28 @@ PYTHONPATH=python pytest tests/ -v
 
 ## Benchmarks
 
-A systematic harness in [`benchmarks/`](benchmarks/) drives PeerCache's
+A systematic benchmark suite ships **inside the package** and is exposed as
+console commands (no repo clone, no `PYTHONPATH`). It drives PeerCache's
 `HiCacheStorage` interface exactly as **SGLang HiCache** does (PD-disaggregated
 `batch_set_v1` / `batch_exists` / `batch_get_v1`) and reports throughput
 (pages/s, tokens/s, GB/s) and latency tail (p50/p95/p99/p999/max) across a sweep
 of thread models, including the full-load saturation/peak throughput.
 
 ```bash
+pip install peercache
+
 # RDMA hardware (publishable numbers)
-PYTHONPATH=python:benchmarks python benchmarks/bench_hicache.py suite \
-    --device-name mlx5_0 --layout mla --page-size 131072 \
+peercache-bench suite --device-name mlx5_0 --layout mla --page-size 131072 \
     --batch-size 32 --concurrencies 1,2,4,8,16,32,64 --duration 10 --tag rdma
 ```
 
+Commands: `peercache-bench` (latency/throughput/saturation/suite),
+`peercache-bench-micro`, `peercache-bench-mooncake`, `peercache-bench-compare`.
+
 > **RDMA-first.** PeerCache is built on RDMA one-sided READ; publishable figures
 > must be measured on RDMA hardware. The TCP fallback is for functional smoke
-> testing only and must not be quoted. See
-> [`benchmarks/README.md`](benchmarks/README.md) and the
+> testing only and must not be quoted. See the
+> [bench README](python/peercache/bench/README.md) and the
 > [Benchmarks docs](https://flymysql.github.io/PeerCache/benchmarks/) for the
 > methodology, thread models, metric definitions, and reproduction recipe.
 
