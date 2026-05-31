@@ -42,6 +42,12 @@ class ConnectionManager {
   RdmaEndpoint* lease(const std::string& peer);
   void release(const std::string& peer, RdmaEndpoint* ep);
 
+  // Destroy a leased channel instead of returning it to the free list. Used
+  // when a transfer on it timed out: the QP may still have in-flight WRs whose
+  // late completions would otherwise corrupt a future lease's drain, so the
+  // safe thing is to tear it down and let a fresh channel be created on demand.
+  void discard(const std::string& peer, RdmaEndpoint* ep);
+
   uint16_t port() const { return bind_port_; }
 
  private:

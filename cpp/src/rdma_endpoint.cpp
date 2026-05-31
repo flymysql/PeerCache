@@ -1,5 +1,6 @@
 #include "peercache/rdma_endpoint.h"
 
+#include <chrono>
 #include <cstring>
 #include <random>
 #include <stdexcept>
@@ -136,13 +137,23 @@ bool RdmaEndpoint::post_read(uint64_t local_addr, uint32_t lkey,
   return ibv_post_send(qp_, &wr, &bad) == 0;
 }
 
-bool RdmaEndpoint::drain(size_t count, std::vector<bool>& ok) {
+bool RdmaEndpoint::drain(size_t count, std::vector<bool>& ok, double timeout_s) {
   size_t seen = 0;
   ibv_wc wc;
+  const auto deadline =
+      std::chrono::steady_clock::now() +
+      std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+          std::chrono::duration<double>(timeout_s));
   while (seen < count) {
     int n = ibv_poll_cq(cq_, 1, &wc);
     if (n < 0) return false;
-    if (n == 0) continue;
+    if (n == 0) {
+      // No completion yet: bail out if we have waited past the deadline so a
+      // silently dropped READ cannot wedge this thread (and thus the whole
+      // benchmark) forever.
+      if (std::chrono::steady_clock::now() >= deadline) return false;
+      continue;
+    }
     ++seen;
     if (wc.status == IBV_WC_SUCCESS && wc.wr_id < ok.size()) {
       ok[static_cast<size_t>(wc.wr_id)] = true;

@@ -1,8 +1,27 @@
 #include "peercache/transfer_engine.h"
 
+#include <cstdlib>
 #include <unordered_map>
 
 namespace peercache {
+
+namespace {
+// Per-batch completion timeout. Defaults to 5s; override with
+// PEERCACHE_RDMA_OP_TIMEOUT_MS so misconfigured fabrics fail fast and visibly
+// instead of hanging the caller indefinitely.
+double op_timeout_s() {
+  static const double v = [] {
+    const char* e = std::getenv("PEERCACHE_RDMA_OP_TIMEOUT_MS");
+    if (e && *e) {
+      char* end = nullptr;
+      double ms = std::strtod(e, &end);
+      if (end != e && ms > 0) return ms / 1000.0;
+    }
+    return 5.0;
+  }();
+  return v;
+}
+}  // namespace
 
 TransferEngine::TransferEngine(const std::string& device_name, uint8_t ib_port,
                                int gid_index, const std::string& bind_host,
@@ -48,9 +67,16 @@ std::vector<bool> TransferEngine::batch_read(
         ++posted;
       }
     }
-    // Drain this channel's own completions and mark success by wr_id.
-    ep->drain(posted, ok);
-    conn_->release(kv.first, ep);
+    // Drain this channel's own completions and mark success by wr_id. On a
+    // timeout the channel may still have in-flight WRs, so discard it (rather
+    // than returning it to the pool) to avoid late completions corrupting a
+    // future drain; a fresh channel is established on the next lease.
+    bool drained = ep->drain(posted, ok, op_timeout_s());
+    if (drained) {
+      conn_->release(kv.first, ep);
+    } else {
+      conn_->discard(kv.first, ep);
+    }
   }
   return ok;
 }
