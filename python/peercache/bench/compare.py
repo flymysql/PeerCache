@@ -26,10 +26,10 @@ import argparse
 import os
 import time
 
-from common import BaselineReport, Workload, render_console
+from peercache.bench.common import BaselineReport, Workload, render_console
 
-import bench_peercache
-import bench_mooncake
+from peercache.bench import microbench as bench_peercache
+from peercache.bench import mooncake_bench as bench_mooncake
 
 
 def parse_sizes(s: str):
@@ -65,7 +65,7 @@ def main() -> None:
     ap.add_argument("--warmup", type=float, default=1.0)
     ap.add_argument("--skip-mooncake", action="store_true")
     ap.add_argument("--skip-store", action="store_true")
-    ap.add_argument("--out-dir", default=os.path.join(os.path.dirname(__file__), "results"))
+    ap.add_argument("--out-dir", default=os.path.join(os.getcwd(), "peercache-bench-results"))
     ap.add_argument("--tag", default="", help="optional label suffix for output files")
     args = ap.parse_args()
 
