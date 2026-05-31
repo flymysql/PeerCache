@@ -9,6 +9,8 @@ A single entry point that dispatches to every benchmark via subcommands:
     peercache-bench micro        ...   # low-level data-plane microbench
     peercache-bench mooncake     ...   # Mooncake transfer_engine_bench wrapper
     peercache-bench compare      ...   # PeerCache vs Mooncake sweep
+    peercache-bench serve        ...   # two-host: producer/data node
+    peercache-bench drive        ...   # two-host: consumer/driver sweep
 
 Run ``peercache-bench <subcommand> --help`` for that subcommand's options.
 """
@@ -18,7 +20,7 @@ from __future__ import annotations
 import argparse
 import logging
 
-from peercache.bench import compare, hicache, microbench, mooncake_bench
+from peercache.bench import compare, dist, hicache, microbench, mooncake_bench
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -45,6 +47,7 @@ def build_parser() -> argparse.ArgumentParser:
     microbench.add_subparser(sub)      # micro
     mooncake_bench.add_subparser(sub)  # mooncake
     compare.add_subparser(sub)         # compare
+    dist.add_subparsers(sub)           # serve / drive (two-host)
     return ap
 
 
