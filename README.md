@@ -123,7 +123,7 @@ peercache-bench suite --device-name mlx5_0 --layout mla --page-size 131072 \
 ```
 
 Commands: `peercache-bench` (latency/throughput/saturation/suite),
-`peercache-bench-micro`, `peercache-bench-mooncake`, `peercache-bench-compare`.
+`peercache-bench micro`, `peercache-bench mooncake`, `peercache-bench compare`.
 
 > **RDMA-first.** PeerCache is built on RDMA one-sided READ; publishable figures
 > must be measured on RDMA hardware. The TCP fallback is for functional smoke

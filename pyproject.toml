@@ -21,10 +21,7 @@ bench = ["mooncake-transfer-engine"]
 
 [project.scripts]
 peercache-meta = "peercache.examples.launch_meta:main"
-peercache-bench = "peercache.bench.hicache:main"
-peercache-bench-micro = "peercache.bench.microbench:main"
-peercache-bench-mooncake = "peercache.bench.mooncake_bench:main"
-peercache-bench-compare = "peercache.bench.compare:main"
+peercache-bench = "peercache.bench.cli:main"
 
 [tool.scikit-build]
 # The C++ extension is optional at runtime: if libibverbs/librdmacm are missing,

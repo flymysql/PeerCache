@@ -10,12 +10,16 @@ It is shipped *inside the package* and exposed as console commands — after
 `pip install peercache` you run it from anywhere, no repo clone, no
 `PYTHONPATH`:
 
-| command | what it runs |
+A single command, `peercache-bench`, with subcommands:
+
+| subcommand | what it runs |
 |---|---|
-| `peercache-bench` | the systematic SGLang-HiCache benchmark (subcommands below) |
-| `peercache-bench-micro` | low-level data-plane microbench (transport / store) |
-| `peercache-bench-mooncake` | wraps Mooncake's official `transfer_engine_bench` |
-| `peercache-bench-compare` | PeerCache-vs-Mooncake sweep under matched block sizes |
+| `latency` / `throughput` / `saturation` / `suite` | the systematic SGLang-HiCache benchmark |
+| `micro` | low-level data-plane microbench (transport / store) |
+| `mooncake` | wraps Mooncake's official `transfer_engine_bench` |
+| `compare` | PeerCache-vs-Mooncake sweep under matched block sizes |
+
+Run `peercache-bench <subcommand> --help` for that subcommand's options.
 
 > [!IMPORTANT]
 > **RDMA-first.** Headline numbers must be measured with `--protocol rdma` on a
@@ -110,7 +114,7 @@ producer `PeerCacheStore` on node A and a consumer on node B pointed at one
 ## Optional: compare against Mooncake
 
 ```bash
-peercache-bench-compare --protocol rdma --device-name mlx5_0 \
+peercache-bench compare --protocol rdma --device-name mlx5_0 \
     --block-sizes 4k,16k,64k,256k,1m --duration 10 --tag rdma
 ```
 
