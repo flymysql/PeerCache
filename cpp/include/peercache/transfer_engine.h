@@ -27,6 +27,16 @@ class TransferEngine {
   // success vector in the same order as `reqs`.
   std::vector<bool> batch_read(const std::vector<ReadRequest>& reqs);
 
+  // Vectorised hot-path variant: the parallel arrays describe N reads without
+  // constructing a Python/pybind object per op. Same grouping/posting/draining
+  // as batch_read; bound with the GIL released so the caller's other threads
+  // run Python while this transfers. All arrays must have the same length.
+  std::vector<bool> batch_read_v(const std::vector<std::string>& remote_nodes,
+                                 const std::vector<uint64_t>& local_addrs,
+                                 const std::vector<uint64_t>& remote_addrs,
+                                 const std::vector<uint32_t>& rkeys,
+                                 const std::vector<uint64_t>& lengths);
+
   // "host:port" this engine listens on for QP bootstrap (advertised in discovery).
   std::string local_endpoint() const;
 
