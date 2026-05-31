@@ -40,7 +40,7 @@ import time
 import urllib.request
 from typing import Optional, Tuple
 
-from common import Workload, make_result, render_console, BaselineReport
+from peercache.bench.common import Workload, make_result, render_console, BaselineReport
 
 
 def find_bench_binary() -> Optional[str]:

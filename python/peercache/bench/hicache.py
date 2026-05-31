@@ -39,7 +39,7 @@ import threading
 import time
 from typing import Callable, List, Optional, Tuple
 
-from common import (
+from peercache.bench.common import (
     BaselineReport,
     Histogram,
     Workload,
@@ -47,7 +47,7 @@ from common import (
     make_result,
     render_console,
 )
-from sglang_sim import Cluster
+from peercache.bench.sglang_sim import Cluster
 
 
 # --------------------------------------------------------------------------- #
@@ -136,7 +136,7 @@ def run_get(args, concurrencies: List[int]) -> List:
         producer = cluster.producer()
         consumer = cluster.consumer()
         # Producer needs `working_set` source slots; consumer needs read slots.
-        from sglang_sim import HostKVPool
+        from peercache.bench.sglang_sim import HostKVPool
 
         prod_pool = HostKVPool(args.page_size, working_set, layout=layout)
         producer.register_mem_pool_host(prod_pool)
@@ -227,7 +227,7 @@ def run_set(args, concurrencies: List[int]) -> List:
     )
     rows = []
     try:
-        from sglang_sim import HostKVPool
+        from peercache.bench.sglang_sim import HostKVPool
 
         producer = cluster.producer()
         prod_pool = HostKVPool(args.page_size, prod_slots, layout=layout)
@@ -300,7 +300,7 @@ def run_exists(args, concurrencies: List[int]) -> List:
     )
     rows = []
     try:
-        from sglang_sim import HostKVPool
+        from peercache.bench.sglang_sim import HostKVPool
 
         producer = cluster.producer()
         consumer = cluster.consumer()
@@ -399,7 +399,7 @@ def _common_args(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--disk", action="store_true", help="enable disk write-through tier")
     ap.add_argument("--max-bytes", type=int, default=8 * (1 << 30),
                     help="host-memory budget guard for buffers/pools")
-    ap.add_argument("--out-dir", default=os.path.join(os.path.dirname(__file__), "results"))
+    ap.add_argument("--out-dir", default=os.path.join(os.getcwd(), "peercache-bench-results"))
     ap.add_argument("--tag", default="")
 
 
