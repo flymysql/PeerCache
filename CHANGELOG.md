@@ -14,7 +14,7 @@ All notable changes to PeerCache are documented here. The format is based on
   `max_channels_per_peer`, default 16). The TCP fallback gains a matching
   per-endpoint socket pool, and the control-plane RPC pool now leases a connection
   per in-flight call so directory lookups/promotes run in parallel.
-- **Benchmark harness** (`benchmarks/`): a systematic, RDMA-first benchmark
+- **Benchmark suite** (`peercache.bench`): a systematic, RDMA-first benchmark
   that drives PeerCache's `HiCacheStorage` interface exactly as SGLang HiCache
   does (PD-disaggregated `batch_set_v1` / `batch_exists` / `batch_get_v1`) via a
   faithful `mem_pool_host` simulator (MLA/MHA). Reports throughput (pages/s,
