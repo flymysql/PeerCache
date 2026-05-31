@@ -1,0 +1,13 @@
+build/
+dist/
+*.egg-info/
+__pycache__/
+*.py[cod]
+*.so
+.pytest_cache/
+.venv/
+venv/
+*.o
+*.obj
+CMakeCache.txt
+CMakeFiles/

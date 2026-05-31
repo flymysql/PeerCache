@@ -1,0 +1,35 @@
+[build-system]
+requires = ["scikit-build-core>=0.8", "pybind11>=2.11"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "peercache"
+version = "0.1.0"
+description = "Peer-to-peer RDMA zero-copy L3 KV-cache backend for SGLang HiCache"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "Apache-2.0" }
+authors = [{ name = "PeerCache contributors" }]
+dependencies = []
+
+[project.optional-dependencies]
+test = ["pytest>=7.0"]
+# msgpack is optional; control plane falls back to JSON if it is missing.
+fast = ["msgpack>=1.0"]
+
+[project.scripts]
+peercache-meta = "peercache.examples.launch_meta:main"
+
+[tool.scikit-build]
+# The C++ extension is optional at runtime: if libibverbs/librdmacm are missing,
+# CMake builds a stub module and the pure-Python TCP fallback transport is used.
+wheel.packages = ["python/peercache"]
+cmake.version = ">=3.18"
+build-dir = "build/{wheel_tag}"
+
+[tool.scikit-build.cmake.define]
+PEERCACHE_NO_RDMA = "OFF"
+
+[tool.pytest.ini_options]
+pythonpath = ["python"]
+testpaths = ["tests"]
