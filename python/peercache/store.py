@@ -30,7 +30,6 @@ from peercache.metrics import Metrics, MetricsServer
 from peercache.pool import PublishedPool
 from peercache.rpc import RpcClientPool
 from peercache.server import NodeRuntime
-from peercache.transport import ReadOp
 from peercache.types import DataLocation
 
 logger = logging.getLogger(__name__)
@@ -64,6 +63,20 @@ except Exception:  # pragma: no cover - standalone / test path
         KV = "kv"
 
 
+_pinned_warned = False
+
+
+def _warn_unpinned(reason: str) -> None:
+    global _pinned_warned
+    if not _pinned_warned:
+        _pinned_warned = True
+        logger.warning(
+            "peercache: host buffers are NOT page-locked (%s); RDMA throughput "
+            "will be reduced. Install torch so pinned memory can be used.",
+            reason,
+        )
+
+
 def _alloc_host_buffer(size: int):
     """Allocate a pinned/host buffer and return (keepalive_obj, base_addr)."""
     try:
@@ -73,10 +86,12 @@ def _alloc_host_buffer(size: int):
         # pageable if pinning fails (still fine for the TCP transport).
         try:
             t = torch.empty(size, dtype=torch.uint8, pin_memory=True)
-        except Exception:
+        except Exception as e:
+            _warn_unpinned(f"torch pin_memory failed: {e}")
             t = torch.empty(size, dtype=torch.uint8)
         return t, t.data_ptr()
     except Exception:
+        _warn_unpinned("torch not available")
         buf = (ctypes.c_byte * size)()
         return buf, ctypes.addressof(buf)
 
@@ -126,6 +141,13 @@ class PeerCacheStore(HiCacheStorage):
         # callbacks, so all access is guarded to stay safe under threaded SGLang.
         self._key_len: Dict[str, int] = {}
         self._key_len_lock = threading.Lock()
+
+        # Optional read-location cache (see directory_read_cache_ttl): maps a
+        # component key -> (DataLocation, expiry_monotonic). Skips the directory
+        # RPC for hot, static working sets.
+        self._dir_cache_ttl = float(getattr(self.config, "directory_read_cache_ttl", 0.0) or 0.0)
+        self._dir_cache: Dict[str, tuple] = {}
+        self._dir_cache_lock = threading.Lock()
 
         # Metrics + monitoring (optional, default on).
         self._metrics = Metrics(node_id=self.config.node_id)
@@ -427,9 +449,44 @@ class PeerCacheStore(HiCacheStorage):
         self._metrics.record_write(published_bytes, time.perf_counter() - t0)
         return results
 
+    def _dir_get(self, comp_keys: List[str]) -> List[Optional[DataLocation]]:
+        """directory.get with an optional short-TTL resident-location cache."""
+        if self._dir_cache_ttl <= 0:
+            return self.runtime.directory.get(comp_keys)
+        now = time.monotonic()
+        out: List[Optional[DataLocation]] = [None] * len(comp_keys)
+        miss_keys: List[str] = []
+        miss_idx: List[int] = []
+        with self._dir_cache_lock:
+            for i, k in enumerate(comp_keys):
+                ent = self._dir_cache.get(k)
+                if ent is not None and ent[1] > now:
+                    out[i] = ent[0]
+                else:
+                    miss_keys.append(k)
+                    miss_idx.append(i)
+        if miss_keys:
+            fresh = self.runtime.directory.get(miss_keys)
+            exp = now + self._dir_cache_ttl
+            with self._dir_cache_lock:
+                for j, loc in enumerate(fresh):
+                    out[miss_idx[j]] = loc
+                    # Only cache resident locations; non-resident entries still
+                    # need the promote path resolved on every access.
+                    if loc is not None and loc.resident:
+                        self._dir_cache[miss_keys[j]] = (loc, exp)
+        return out
+
+    def _dir_cache_invalidate(self, keys: List[str]) -> None:
+        if self._dir_cache_ttl <= 0 or not keys:
+            return
+        with self._dir_cache_lock:
+            for k in keys:
+                self._dir_cache.pop(k, None)
+
     def _fetch(self, comp_keys: List[str], ptrs: List[int], sizes: List[int]) -> List[bool]:
         t0 = time.perf_counter()
-        locations = self.runtime.directory.get(comp_keys)
+        locations = self._dir_get(comp_keys)
         results = [False] * len(comp_keys)
         sources: List[Optional[str]] = [None] * len(comp_keys)
 
@@ -438,7 +495,13 @@ class PeerCacheStore(HiCacheStorage):
         #    promoted locally (loads disk -> pool == "prefetch back into LRU").
         promoted = self._resolve_non_resident(comp_keys, locations)
 
-        ops: List[ReadOp] = []
+        # Build parallel arrays for the remote reads (no per-op Python object on
+        # the GIL-held hot path); local hits are served by memmove inline.
+        r_nodes: List[str] = []
+        r_local: List[int] = []
+        r_remote: List[int] = []
+        r_rkey: List[int] = []
+        r_len: List[int] = []
         op_index: List[int] = []
         for i, loc in enumerate(locations):
             if loc is None or not loc.resident:
@@ -450,18 +513,15 @@ class PeerCacheStore(HiCacheStorage):
                 results[i] = True
                 sources[i] = "disk" if i in promoted else "local"
                 continue
-            ops.append(
-                ReadOp(
-                    remote_endpoint=loc.rdma_endpoint,
-                    local_addr=ptrs[i],
-                    remote_addr=loc.remote_addr,
-                    rkey=loc.rkey,
-                    length=loc.length,
-                )
-            )
+            r_nodes.append(loc.rdma_endpoint)
+            r_local.append(ptrs[i])
+            r_remote.append(loc.remote_addr)
+            r_rkey.append(loc.rkey)
+            r_len.append(loc.length)
             op_index.append(i)
-        if ops:
-            oks = self.runtime.transport.batch_read(ops)
+        if op_index:
+            oks = self.runtime.transport.batch_read_v(
+                r_nodes, r_local, r_remote, r_rkey, r_len)
             for j, ok in enumerate(oks):
                 idx = op_index[j]
                 results[idx] = bool(ok)
@@ -472,6 +532,10 @@ class PeerCacheStore(HiCacheStorage):
         for i in range(len(comp_keys)):
             self._metrics.record_read(results[i], sizes[i] if results[i] else 0,
                                       latency, sources[i])
+        # Drop any failed keys from the read cache so a stale/evicted location
+        # self-heals on the next access (re-resolved via the directory).
+        if self._dir_cache_ttl > 0:
+            self._dir_cache_invalidate([k for i, k in enumerate(comp_keys) if not results[i]])
         return results
 
     def _resolve_non_resident(self, comp_keys, locations) -> set:

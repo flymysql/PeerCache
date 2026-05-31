@@ -37,8 +37,12 @@ class RdmaEndpoint {
 
   // Drain `count` completions from this endpoint's private CQ. For every
   // successful completion whose wr_id is in range, ok[wr_id] is set true.
-  // Returns true if all `count` completions were collected without a poll error.
-  bool drain(size_t count, std::vector<bool>& ok);
+  // Polls for at most `timeout_s` seconds; if completions stop arriving (e.g. a
+  // RoCE misconfiguration where READs are silently black-holed and never
+  // complete) it returns false instead of spinning forever, so the data plane
+  // fails fast rather than hanging the whole process. Returns true only if all
+  // `count` completions were collected without a poll error or timeout.
+  bool drain(size_t count, std::vector<bool>& ok, double timeout_s);
 
   bool connected() const { return connected_; }
 

@@ -51,6 +51,26 @@ class Transport:
     def batch_read(self, ops: List[ReadOp]) -> List[bool]:  # pragma: no cover
         raise NotImplementedError
 
+    def batch_read_v(
+        self,
+        remote_nodes: List[str],
+        local_addrs: List[int],
+        remote_addrs: List[int],
+        rkeys: List[int],
+        lengths: List[int],
+    ) -> List[bool]:
+        """Vectorised read: parallel arrays instead of ReadOp objects.
+
+        Default builds ReadOp objects and delegates to ``batch_read``; the RDMA
+        transport overrides this to call the C++ engine directly (no per-op
+        Python/pybind object on the GIL-held hot path)."""
+        ops = [
+            ReadOp(remote_nodes[i], local_addrs[i], remote_addrs[i],
+                   rkeys[i], lengths[i])
+            for i in range(len(lengths))
+        ]
+        return self.batch_read(ops)
+
     def local_endpoint(self) -> str:  # pragma: no cover
         raise NotImplementedError
 
@@ -93,6 +113,12 @@ class RdmaTransport(Transport):
             for op in ops
         ]
         return list(self._engine.batch_read(reqs))
+
+    def batch_read_v(self, remote_nodes, local_addrs, remote_addrs, rkeys, lengths):
+        # Hot path: hand the raw arrays straight to C++ (GIL released there),
+        # avoiding one Python/pybind object per op.
+        return list(self._engine.batch_read_v(
+            remote_nodes, local_addrs, remote_addrs, rkeys, lengths))
 
     def local_endpoint(self) -> str:
         return self._engine.local_endpoint()
