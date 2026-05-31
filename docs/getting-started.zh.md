@@ -38,7 +38,7 @@ python -c "import peercache; print(peercache.__version__)"
 因此这里唯一的决策是：把哪个节点的 IP 写进 `discovery_addr`。
 
 > 可选：如果你更希望使用一台不承载 SGLang 的专用发现主机，可在该机器上运行
-> `peercache-meta --bind 0.0.0.0:9100` 并把 `discovery_addr` 指向它。内嵌行为不受
+> `peercache-meta --bind 0.0.0.0:31998` 并把 `discovery_addr` 指向它。内嵌行为不受
 > 影响 —— 谁的 IP 等于 `discovery_addr` 且能成功绑定端口，谁就承担发现服务。
 
 ## 2. 用 PeerCache 后端启动 SGLang
@@ -57,7 +57,7 @@ python -m sglang.launch_server \
     "backend_name": "peercache",
     "module_path":  "peercache.store",
     "class_name":   "PeerCacheStore",
-    "discovery_addr": "NODE0_IP:9100",
+    "discovery_addr": "NODE0_IP:31998",
     "protocol": "rdma",
     "device_name": "mlx5_0",
     "ib_port": 1,

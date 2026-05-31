@@ -5,7 +5,7 @@ IP matches `discovery_addr` auto-hosts discovery in-process, so you do not need 
 separate process. Use this only if you want a dedicated discovery host that does
 not serve SGLang. It does service discovery only -- no metadata and no data.
 
-    python -m peercache.examples.launch_meta --bind 0.0.0.0:9100
+    python -m peercache.examples.launch_meta --bind 0.0.0.0:31998
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from peercache.discovery import DiscoveryServer
 def main() -> None:
     parser = argparse.ArgumentParser(description="PeerCache meta/discovery node")
     parser.add_argument(
-        "--bind", default="0.0.0.0:9100", help="host:port to bind (default 0.0.0.0:9100)"
+        "--bind", default="0.0.0.0:31998", help="host:port to bind (default 0.0.0.0:31998)"
     )
     parser.add_argument(
         "--member-ttl", type=float, default=6.0,

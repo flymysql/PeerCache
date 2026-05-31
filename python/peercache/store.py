@@ -5,7 +5,7 @@ Registered with SGLang via the ``dynamic`` backend mechanism (no SGLang patch):
     --hicache-storage-backend dynamic
     --hicache-storage-backend-extra-config
         '{"backend_name":"peercache","module_path":"peercache.store",
-          "class_name":"PeerCacheStore","discovery_addr":"META:9100", ...}'
+          "class_name":"PeerCacheStore","discovery_addr":"META:31998", ...}'
 
 Write path  : ``set`` copies the page into the node-local published pool
               (no network) and PUTs ``key -> {node,addr,rkey,len}`` to the

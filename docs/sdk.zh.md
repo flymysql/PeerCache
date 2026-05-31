@@ -14,7 +14,7 @@ from peercache.store import PeerCacheStore
 
 storage_config = SimpleNamespace(
     tp_rank=0, tp_size=1, pp_rank=0, pp_size=1, is_mla_model=False,
-    extra_config={"discovery_addr": "10.0.0.1:9100", "protocol": "rdma",
+    extra_config={"discovery_addr": "10.0.0.1:31998", "protocol": "rdma",
                   "device_name": "mlx5_0", "global_segment_size": "8gb"},
 )
 store = PeerCacheStore(storage_config)
@@ -41,7 +41,7 @@ store.register_mem_pool_host(mem_pool_host)   # SGLang 会调用它
 from peercache.config import PeerCacheConfig
 
 cfg = PeerCacheConfig(
-    discovery_addr="10.0.0.1:9100",
+    discovery_addr="10.0.0.1:31998",
     protocol="rdma",            # 或 "tcp"
     device_name="mlx5_0",
     ib_port=1, gid_index=3,
@@ -50,7 +50,7 @@ cfg = PeerCacheConfig(
     directory_replicas=1,
 )
 # 或从 SGLang extra_config 构造：
-cfg = PeerCacheConfig.from_extra_config({"discovery_addr": "10.0.0.1:9100"})
+cfg = PeerCacheConfig.from_extra_config({"discovery_addr": "10.0.0.1:31998"})
 ```
 
 ## `peercache.server.NodeRuntime`
@@ -107,7 +107,7 @@ client.delete([key])
 ```python
 from peercache.discovery import DiscoveryServer, DiscoveryClient
 
-meta = DiscoveryServer("0.0.0.0", 9100); meta.start()
+meta = DiscoveryServer("0.0.0.0", 31998); meta.start()
 
 client = DiscoveryClient(addr, node_info, on_members=cb, heartbeat_interval=2.0)
 client.start()                    # 注册 + 心跳 + 刷新成员列表

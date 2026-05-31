@@ -144,11 +144,11 @@ auto-starts the discovery service in-process.
 python -m sglang.launch_server --enable-hierarchical-cache \
   --hicache-storage-backend dynamic \
   --hicache-storage-backend-extra-config \
-  '{"backend_name":"peercache","module_path":"peercache.store","class_name":"PeerCacheStore","discovery_addr":"NODE0_IP:9100","protocol":"rdma","device_name":"mlx5_0","global_segment_size":"4gb"}'
+  '{"backend_name":"peercache","module_path":"peercache.store","class_name":"PeerCacheStore","discovery_addr":"NODE0_IP:31998","protocol":"rdma","device_name":"mlx5_0","global_segment_size":"4gb"}'
 ```
 
 (Optionally, you can still run a standalone meta with `peercache-meta --bind
-0.0.0.0:9100` if you prefer a dedicated discovery host.)
+0.0.0.0:31998` if you prefer a dedicated discovery host.)
 
 See [examples/sglang_launch.md](examples/sglang_launch.md) for details.
 

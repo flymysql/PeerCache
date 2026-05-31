@@ -18,7 +18,7 @@ from peercache.types import NodeInfo
 class DiscoveryServer:
     """Runs on the meta node. Stateless except for the membership table."""
 
-    def __init__(self, bind_host: str = "0.0.0.0", bind_port: int = 9100,
+    def __init__(self, bind_host: str = "0.0.0.0", bind_port: int = 31998,
                  member_ttl: float = 6.0):
         self._ttl = member_ttl
         self._members: Dict[str, Tuple[dict, float]] = {}
