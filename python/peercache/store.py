@@ -30,7 +30,6 @@ from peercache.metrics import Metrics, MetricsServer
 from peercache.pool import PublishedPool
 from peercache.rpc import RpcClientPool
 from peercache.server import NodeRuntime
-from peercache.transport import ReadOp
 from peercache.types import DataLocation
 
 logger = logging.getLogger(__name__)
@@ -496,7 +495,13 @@ class PeerCacheStore(HiCacheStorage):
         #    promoted locally (loads disk -> pool == "prefetch back into LRU").
         promoted = self._resolve_non_resident(comp_keys, locations)
 
-        ops: List[ReadOp] = []
+        # Build parallel arrays for the remote reads (no per-op Python object on
+        # the GIL-held hot path); local hits are served by memmove inline.
+        r_nodes: List[str] = []
+        r_local: List[int] = []
+        r_remote: List[int] = []
+        r_rkey: List[int] = []
+        r_len: List[int] = []
         op_index: List[int] = []
         for i, loc in enumerate(locations):
             if loc is None or not loc.resident:
@@ -508,18 +513,15 @@ class PeerCacheStore(HiCacheStorage):
                 results[i] = True
                 sources[i] = "disk" if i in promoted else "local"
                 continue
-            ops.append(
-                ReadOp(
-                    remote_endpoint=loc.rdma_endpoint,
-                    local_addr=ptrs[i],
-                    remote_addr=loc.remote_addr,
-                    rkey=loc.rkey,
-                    length=loc.length,
-                )
-            )
+            r_nodes.append(loc.rdma_endpoint)
+            r_local.append(ptrs[i])
+            r_remote.append(loc.remote_addr)
+            r_rkey.append(loc.rkey)
+            r_len.append(loc.length)
             op_index.append(i)
-        if ops:
-            oks = self.runtime.transport.batch_read(ops)
+        if op_index:
+            oks = self.runtime.transport.batch_read_v(
+                r_nodes, r_local, r_remote, r_rkey, r_len)
             for j, ok in enumerate(oks):
                 idx = op_index[j]
                 results[idx] = bool(ok)
