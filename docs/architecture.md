@@ -190,9 +190,38 @@ move it with `metrics_port`, or turn off just the HTML page with
 - Connection bootstrap uses a tiny TCP handshake (exchange of `QpInfo`:
   qp_num / psn / lid / gid), fully decoupling device selection from connection
   setup. The QP then transitions INIT → RTR → RTS.
-- One RC QP per peer, created lazily and pooled, avoiding O(N²) eager meshes.
-- A shared completion queue is drained per batch; completions are matched to
-  requests by `wr_id`.
+- **Per-peer channel pool**: each peer has a bounded pool of *channels*, where a
+  channel is one RC QP plus its **own private completion queue**. Channels are
+  created lazily, reused via a free list, and capped at `max_channels_per_peer`.
+  This avoids O(N²) eager meshes while still allowing several readers to the same
+  peer at once.
+- Within a batch, completions are matched to requests by `wr_id` and drained from
+  that channel's own CQ.
+
+## Concurrency model
+
+PeerCache is safe and parallel on both sides under multi-threaded SGLang:
+
+- **Server side** is already fully threaded: the control-plane RPC server, the
+  data-plane responder (RDMA responder QPs / TCP serve loop), and the metrics
+  server each handle requests on independent threads. One-sided RDMA READ needs
+  no responder CPU at all.
+- **Client read parallelism**: `batch_read` releases the Python GIL for the
+  entire RDMA transfer. Each call leases an independent channel per peer (QP +
+  private CQ), so N reader threads post and poll on N separate CQs with zero
+  shared-CQ contention. Reaching the cap simply makes extra threads wait briefly
+  for a channel to be released.
+- **Client control parallelism**: the RPC client pool and (in TCP fallback) the
+  socket pool lease a connection per in-flight call, so directory lookups and
+  promotes to the same owner run concurrently instead of serializing on one
+  socket. A connection is only returned to the pool after a clean call; broken
+  connections are closed, never reused.
+- **Shared state**: the published pool, disk index, and the `key → length` map
+  are guarded by locks, so concurrent `set`/`get`/eviction callbacks stay
+  consistent.
+
+Tune `max_channels_per_peer` (default 16) to trade memory (QPs/CQs/sockets) for
+read concurrency to a single hot peer.
 
 ## Failure handling and trade-offs
 

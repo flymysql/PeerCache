@@ -78,8 +78,12 @@ bool recv_str(int fd, std::string* s) {
 
 ConnectionManager::ConnectionManager(RdmaContext* ctx,
                                      const std::string& bind_host,
-                                     uint16_t bind_port)
-    : ctx_(ctx), bind_host_(bind_host), bind_port_(bind_port) {}
+                                     uint16_t bind_port,
+                                     size_t max_channels_per_peer)
+    : ctx_(ctx),
+      bind_host_(bind_host),
+      bind_port_(bind_port),
+      max_channels_(max_channels_per_peer == 0 ? 1 : max_channels_per_peer) {}
 
 ConnectionManager::~ConnectionManager() {
   running_ = false;
@@ -127,7 +131,9 @@ void ConnectionManager::listen_loop() {
 }
 
 void ConnectionManager::handle_inbound(int fd) {
-  // Client sends: its advertised endpoint string, then its QpInfo.
+  // Client sends: its advertised endpoint string, then its QpInfo. We create a
+  // fresh passive QP for every inbound channel and keep it alive; the requester
+  // side uses its matching QP to issue one-sided READs against our MRs.
   std::string peer_key;
   uint8_t buf[26];
   if (!recv_str(fd, &peer_key)) return;
@@ -143,19 +149,22 @@ void ConnectionManager::handle_inbound(int fd) {
   if (!write_full(fd, out, sizeof(out))) return;
   if (!ep->connect(remote)) return;
 
-  std::lock_guard<std::mutex> lk(mu_);
-  endpoints_[peer_key] = std::move(ep);
+  std::lock_guard<std::mutex> lk(inbound_mu_);
+  inbound_.push_back(std::move(ep));
 }
 
-RdmaEndpoint* ConnectionManager::get_or_connect(const std::string& peer) {
-  {
-    std::lock_guard<std::mutex> lk(mu_);
-    auto it = endpoints_.find(peer);
-    if (it != endpoints_.end() && it->second->connected()) {
-      return it->second.get();
-    }
+ConnectionManager::PeerPool* ConnectionManager::pool_for(
+    const std::string& peer) {
+  std::lock_guard<std::mutex> lk(pools_mu_);
+  auto it = pools_.find(peer);
+  if (it == pools_.end()) {
+    it = pools_.emplace(peer, std::make_unique<PeerPool>()).first;
   }
+  return it->second.get();
+}
 
+std::unique_ptr<RdmaEndpoint> ConnectionManager::connect_new(
+    const std::string& peer) {
   auto colon = peer.rfind(':');
   if (colon == std::string::npos) return nullptr;
   std::string host = peer.substr(0, colon);
@@ -197,11 +206,44 @@ RdmaEndpoint* ConnectionManager::get_or_connect(const std::string& peer) {
   QpInfo remote;
   deserialize(in, &remote);
   if (!ep->connect(remote)) return nullptr;
+  return ep;
+}
 
-  std::lock_guard<std::mutex> lk(mu_);
-  RdmaEndpoint* raw = ep.get();
-  endpoints_[peer] = std::move(ep);
-  return raw;
+RdmaEndpoint* ConnectionManager::lease(const std::string& peer) {
+  PeerPool* p = pool_for(peer);
+  std::unique_lock<std::mutex> lk(p->mu);
+  for (;;) {
+    if (!p->free.empty()) {
+      RdmaEndpoint* ep = p->free.back();
+      p->free.pop_back();
+      return ep;
+    }
+    if (p->created < max_channels_) {
+      // Reserve a slot, then perform the (blocking) handshake without the lock.
+      ++p->created;
+      lk.unlock();
+      std::unique_ptr<RdmaEndpoint> ep = connect_new(peer);
+      lk.lock();
+      if (!ep) {
+        --p->created;
+        p->cv.notify_one();
+        return nullptr;
+      }
+      RdmaEndpoint* raw = ep.get();
+      p->owned.push_back(std::move(ep));
+      return raw;
+    }
+    // At capacity: wait for another thread to release a channel.
+    p->cv.wait(lk);
+  }
+}
+
+void ConnectionManager::release(const std::string& peer, RdmaEndpoint* ep) {
+  if (!ep) return;
+  PeerPool* p = pool_for(peer);
+  std::lock_guard<std::mutex> lk(p->mu);
+  p->free.push_back(ep);
+  p->cv.notify_one();
 }
 
 }  // namespace peercache

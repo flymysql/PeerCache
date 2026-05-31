@@ -60,10 +60,10 @@ PYBIND11_MODULE(_peercache, m) {
 
   py::class_<TransferEngine>(m, "TransferEngine")
       .def(py::init<const std::string&, uint8_t, int, const std::string&,
-                    uint16_t>(),
+                    uint16_t, size_t>(),
            py::arg("device_name"), py::arg("ib_port") = 1,
            py::arg("gid_index") = 3, py::arg("bind_host") = "0.0.0.0",
-           py::arg("bind_port") = 0)
+           py::arg("bind_port") = 0, py::arg("max_channels_per_peer") = 16)
       .def("register_mr", &TransferEngine::register_mr, py::arg("addr"),
            py::arg("length"))
       .def("deregister_mr", &TransferEngine::deregister_mr, py::arg("addr"))

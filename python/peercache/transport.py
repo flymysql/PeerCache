@@ -70,6 +70,7 @@ class RdmaTransport(Transport):
             gid_index=config.gid_index,
             bind_host=config.local_hostname,
             bind_port=config.rdma_port,
+            max_channels_per_peer=getattr(config, "max_channels_per_peer", 16),
         )
         self._ReadRequest = _peercache.ReadRequest
 
@@ -123,8 +124,12 @@ class TcpTransport(Transport):
     def __init__(self, config):
         self._regions: List[Tuple[int, int]] = []  # (addr, length) for validation
         self._lock = threading.Lock()
-        self._clients: dict[str, socket.socket] = {}
-        self._client_lock = threading.Lock()
+        # Per-endpoint pool of idle sockets so that multiple reader threads can
+        # each lease their own socket and issue reads in parallel (a socket only
+        # ever has one in-flight request, keeping the framing trivial).
+        self._idle: dict[str, List[socket.socket]] = {}
+        self._pool_lock = threading.Lock()
+        self._max_idle = max(1, getattr(config, "max_channels_per_peer", 16))
 
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -175,40 +180,52 @@ class TcpTransport(Transport):
                 except OSError:
                     return
 
-    def _drop_client(self, endpoint: str) -> None:
-        with self._client_lock:
-            s = self._clients.pop(endpoint, None)
-        if s is not None:
-            try:
-                s.close()
-            except Exception:
-                pass
+    def _acquire(self, endpoint: str) -> socket.socket:
+        with self._pool_lock:
+            idle = self._idle.get(endpoint)
+            if idle:
+                return idle.pop()
+        host, port = endpoint.rsplit(":", 1)
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.connect((host, int(port)))
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        return sock
+
+    def _release(self, endpoint: str, sock: socket.socket) -> None:
+        with self._pool_lock:
+            idle = self._idle.setdefault(endpoint, [])
+            if len(idle) < self._max_idle:
+                idle.append(sock)
+                return
+        try:
+            sock.close()
+        except Exception:
+            pass
 
     def batch_read(self, ops: List[ReadOp]) -> List[bool]:
         results: List[bool] = []
         for op in ops:
             ok = False
+            sock = None
             try:
-                # A single in-flight request per socket keeps framing trivial.
-                with self._client_lock:
-                    sock = self._clients.get(op.remote_endpoint)
-                    if sock is None:
-                        host, port = op.remote_endpoint.rsplit(":", 1)
-                        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                        sock.connect((host, int(port)))
-                        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-                        self._clients[op.remote_endpoint] = sock
-                    sock.sendall(struct.pack(">QQ", op.remote_addr, op.length))
-                    data = _recv_exact(sock, op.length)
+                # Lease a dedicated socket; a single in-flight request per socket
+                # keeps framing trivial while allowing cross-thread parallelism.
+                sock = self._acquire(op.remote_endpoint)
+                sock.sendall(struct.pack(">QQ", op.remote_addr, op.length))
+                data = _recv_exact(sock, op.length)
                 if data is not None and len(data) == op.length:
                     buf = (ctypes.c_char * op.length).from_buffer_copy(data)
                     ctypes.memmove(op.local_addr, buf, op.length)
                     ok = True
-                else:
-                    self._drop_client(op.remote_endpoint)
+                    self._release(op.remote_endpoint, sock)
+                    sock = None
             except Exception:
-                self._drop_client(op.remote_endpoint)
                 ok = False
+            if sock is not None:  # error path: do not reuse a broken socket
+                try:
+                    sock.close()
+                except Exception:
+                    pass
             results.append(ok)
         return results
 
@@ -221,6 +238,14 @@ class TcpTransport(Transport):
             self._sock.close()
         except Exception:
             pass
+        with self._pool_lock:
+            for socks in self._idle.values():
+                for s in socks:
+                    try:
+                        s.close()
+                    except Exception:
+                        pass
+            self._idle.clear()
 
 
 def create_transport(config) -> Transport:

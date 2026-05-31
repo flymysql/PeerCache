@@ -168,23 +168,49 @@ class RpcClient:
 
 
 class RpcClientPool:
-    """Lazily-created, reused RpcClient per endpoint."""
+    """Per-endpoint pool of reusable RpcClients.
 
-    def __init__(self, timeout: float = 5.0):
+    ``call()`` leases an idle client (or opens a new connection), so multiple
+    threads can issue control-plane RPCs to the same endpoint concurrently
+    instead of serializing on a single shared connection. A client is returned
+    to the idle list only after a successful call; on error it is closed so a
+    broken connection is never reused.
+    """
+
+    def __init__(self, timeout: float = 5.0, max_idle_per_endpoint: int = 8):
         self._timeout = timeout
-        self._clients: Dict[str, RpcClient] = {}
+        self._max_idle = max(1, max_idle_per_endpoint)
+        self._idle: Dict[str, list] = {}
         self._lock = threading.Lock()
 
-    def get(self, endpoint: str) -> RpcClient:
+    def _acquire(self, endpoint: str) -> RpcClient:
         with self._lock:
-            c = self._clients.get(endpoint)
-            if c is None:
-                c = RpcClient(endpoint, self._timeout)
-                self._clients[endpoint] = c
-            return c
+            idle = self._idle.get(endpoint)
+            if idle:
+                return idle.pop()
+        return RpcClient(endpoint, self._timeout)
+
+    def _release(self, endpoint: str, client: RpcClient) -> None:
+        with self._lock:
+            idle = self._idle.setdefault(endpoint, [])
+            if len(idle) < self._max_idle:
+                idle.append(client)
+                return
+        client.close()
+
+    def call(self, endpoint: str, method: str, args: Optional[dict] = None) -> Any:
+        client = self._acquire(endpoint)
+        try:
+            result = client.call(method, args)
+        except Exception:
+            client.close()
+            raise
+        self._release(endpoint, client)
+        return result
 
     def close(self) -> None:
         with self._lock:
-            for c in self._clients.values():
-                c.close()
-            self._clients.clear()
+            for clients in self._idle.values():
+                for c in clients:
+                    c.close()
+            self._idle.clear()

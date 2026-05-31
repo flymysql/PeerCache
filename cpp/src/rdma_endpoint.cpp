@@ -10,19 +10,24 @@ namespace {
 constexpr int kMaxSendWr = 1024;
 constexpr int kMaxRecvWr = 16;
 constexpr int kMaxSge = 1;
+constexpr int kCqDepth = kMaxSendWr + kMaxRecvWr;
 }  // namespace
 
 RdmaEndpoint::RdmaEndpoint(RdmaContext* ctx) : ctx_(ctx) {}
 
 RdmaEndpoint::~RdmaEndpoint() {
   if (qp_) ibv_destroy_qp(qp_);
+  if (cq_) ibv_destroy_cq(cq_);
 }
 
 QpInfo RdmaEndpoint::create() {
+  cq_ = ibv_create_cq(ctx_->context(), kCqDepth, nullptr, nullptr, 0);
+  if (!cq_) throw std::runtime_error("peercache: ibv_create_cq failed");
+
   ibv_qp_init_attr attr;
   std::memset(&attr, 0, sizeof(attr));
-  attr.send_cq = ctx_->cq();
-  attr.recv_cq = ctx_->cq();
+  attr.send_cq = cq_;
+  attr.recv_cq = cq_;
   attr.qp_type = IBV_QPT_RC;
   attr.cap.max_send_wr = kMaxSendWr;
   attr.cap.max_recv_wr = kMaxRecvWr;
@@ -131,17 +136,19 @@ bool RdmaEndpoint::post_read(uint64_t local_addr, uint32_t lkey,
   return ibv_post_send(qp_, &wr, &bad) == 0;
 }
 
-int RdmaEndpoint::poll(int count) {
-  int done = 0;
+bool RdmaEndpoint::drain(size_t count, std::vector<bool>& ok) {
+  size_t seen = 0;
   ibv_wc wc;
-  while (done < count) {
-    int n = ibv_poll_cq(ctx_->cq(), 1, &wc);
-    if (n < 0) return -1;
+  while (seen < count) {
+    int n = ibv_poll_cq(cq_, 1, &wc);
+    if (n < 0) return false;
     if (n == 0) continue;
-    if (wc.status != IBV_WC_SUCCESS) return -1;
-    ++done;
+    ++seen;
+    if (wc.status == IBV_WC_SUCCESS && wc.wr_id < ok.size()) {
+      ok[static_cast<size_t>(wc.wr_id)] = true;
+    }
   }
-  return done;
+  return true;
 }
 
 }  // namespace peercache

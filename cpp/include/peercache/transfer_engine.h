@@ -15,7 +15,8 @@ namespace peercache {
 class TransferEngine {
  public:
   TransferEngine(const std::string& device_name, uint8_t ib_port, int gid_index,
-                 const std::string& bind_host, uint16_t bind_port);
+                 const std::string& bind_host, uint16_t bind_port,
+                 size_t max_channels_per_peer = 16);
   ~TransferEngine();
 
   // Register a host buffer for RDMA (as both a READ source and destination).
