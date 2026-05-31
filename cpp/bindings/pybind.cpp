@@ -59,11 +59,12 @@ PYBIND11_MODULE(_peercache, m) {
       .def_readwrite("length", &ReadRequest::length);
 
   py::class_<TransferEngine>(m, "TransferEngine")
-      .def(py::init<const std::string&, uint8_t, int, const std::string&,
-                    uint16_t, size_t>(),
-           py::arg("device_name"), py::arg("ib_port") = 1,
+      .def(py::init<const std::vector<std::string>&, uint8_t, int,
+                    const std::string&, uint16_t, size_t>(),
+           py::arg("device_names"), py::arg("ib_port") = 1,
            py::arg("gid_index") = 3, py::arg("bind_host") = "0.0.0.0",
            py::arg("bind_port") = 0, py::arg("max_channels_per_peer") = 16)
+      .def("n_rails", &TransferEngine::n_rails)
       .def("register_mr", &TransferEngine::register_mr, py::arg("addr"),
            py::arg("length"))
       .def("deregister_mr", &TransferEngine::deregister_mr, py::arg("addr"))
@@ -73,7 +74,12 @@ PYBIND11_MODULE(_peercache, m) {
            py::arg("remote_nodes"), py::arg("local_addrs"),
            py::arg("remote_addrs"), py::arg("rkeys"), py::arg("lengths"),
            py::call_guard<py::gil_scoped_release>())
-      .def("local_endpoint", &TransferEngine::local_endpoint);
+      .def("batch_read_multi", &TransferEngine::batch_read_multi,
+           py::arg("node_ids"), py::arg("local_addrs"), py::arg("remote_addrs"),
+           py::arg("lengths"), py::arg("rail_endpoints"), py::arg("rail_rkeys"),
+           py::call_guard<py::gil_scoped_release>())
+      .def("local_endpoint", &TransferEngine::local_endpoint)
+      .def("local_endpoints", &TransferEngine::local_endpoints);
 }
 
 #endif
