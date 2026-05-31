@@ -3,6 +3,9 @@ project(peercache LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+# Use GNU extensions (-std=gnu++17) so POSIX/SVID symbols (sockets, etc.) are
+# exposed; _GNU_SOURCE below makes this robust even under strict -std=c++17.
+set(CMAKE_CXX_EXTENSIONS ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 option(PEERCACHE_NO_RDMA "Build without libibverbs/librdmacm (stub transport)" OFF)
@@ -39,6 +42,10 @@ target_include_directories(_peercache PRIVATE cpp/include)
 if(PEERCACHE_NO_RDMA)
   target_compile_definitions(_peercache PRIVATE PEERCACHE_NO_RDMA=1)
 else()
+  # _GNU_SOURCE exposes POSIX socket APIs and SVID helpers regardless of the
+  # active -std level (it must be defined before any system header is included,
+  # which a compile definition guarantees).
+  target_compile_definitions(_peercache PRIVATE _GNU_SOURCE)
   target_include_directories(_peercache PRIVATE ${IBVERBS_INCLUDE} ${RDMACM_INCLUDE})
   target_link_libraries(_peercache PRIVATE ${IBVERBS_LIB} ${RDMACM_LIB} pthread)
 endif()
