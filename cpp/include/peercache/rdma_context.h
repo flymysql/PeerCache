@@ -10,9 +10,11 @@
 
 namespace peercache {
 
-// Owns a single IB device context, a protection domain and a shared completion
-// queue. Holds the registry of memory regions registered against this PD so we
-// can look up the local lkey for any address used as a READ destination.
+// Owns a single IB device context and a protection domain. Holds the registry
+// of memory regions registered against this PD so we can look up the local lkey
+// for any address used as a READ destination. Completion queues are owned by the
+// individual endpoints (one CQ per channel) so that concurrent readers never
+// share a CQ and can poll in parallel without locking.
 class RdmaContext {
  public:
   // device_name may be empty -> pick the first active device.
@@ -30,7 +32,6 @@ class RdmaContext {
   uint32_t lkey_for(uint64_t local_addr) const;
 
   ibv_pd* pd() const { return pd_; }
-  ibv_cq* cq() const { return cq_; }
   ibv_context* context() const { return ctx_; }
   uint8_t ib_port() const { return ib_port_; }
   int gid_index() const { return gid_index_; }
@@ -40,7 +41,6 @@ class RdmaContext {
  private:
   ibv_context* ctx_ = nullptr;
   ibv_pd* pd_ = nullptr;
-  ibv_cq* cq_ = nullptr;
   uint8_t ib_port_ = 1;
   int gid_index_ = 0;
   ibv_port_attr port_attr_{};

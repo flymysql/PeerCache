@@ -120,6 +120,7 @@ RDMA / transport:
 | `device_name` | `""` | RDMA device, e.g. `mlx5_0`; empty = first active device |
 | `ib_port` | `1` | HCA port |
 | `gid_index` | `3` | GID index (RoCE v2 is typically 3) |
+| `max_channels_per_peer` | `16` | max concurrent data-plane channels per peer (RDMA QP+CQ, or TCP sockets in fallback). Bounds parallel readers to one peer; extra threads briefly wait for a free channel |
 
 Capacity / placement:
 

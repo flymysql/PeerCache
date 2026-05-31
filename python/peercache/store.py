@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import ctypes
 import logging
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional
@@ -121,7 +122,10 @@ class PeerCacheStore(HiCacheStorage):
         self._pool: Optional[PublishedPool] = None
         self._pool_keepalive = None
         self._recv_mr = None
+        # _key_len is touched by concurrent batch_set / batch_get / eviction
+        # callbacks, so all access is guarded to stay safe under threaded SGLang.
         self._key_len: Dict[str, int] = {}
+        self._key_len_lock = threading.Lock()
 
         # Metrics + monitoring (optional, default on).
         self._metrics = Metrics(node_id=self.config.node_id)
@@ -213,8 +217,10 @@ class PeerCacheStore(HiCacheStorage):
                 return
             endpoint = self.runtime.local_rdma_endpoint
             entries = {}
+            with self._key_len_lock:
+                lengths = {k: self._key_len.get(k) for k in evicted_keys}
             for k in evicted_keys:
-                length = self._key_len.get(k)
+                length = lengths.get(k)
                 if length is None:
                     continue
                 entries[k] = DataLocation(
@@ -234,8 +240,9 @@ class PeerCacheStore(HiCacheStorage):
         # A page left the disk tier too -> it is truly gone; remove its directory
         # entry so readers see a clean miss.
         self._metrics.inc("disk_evictions", len(evicted_keys))
-        for k in evicted_keys:
-            self._key_len.pop(k, None)
+        with self._key_len_lock:
+            for k in evicted_keys:
+                self._key_len.pop(k, None)
         try:
             self.runtime.directory.delete(evicted_keys)
         except Exception as e:
@@ -282,7 +289,8 @@ class PeerCacheStore(HiCacheStorage):
             loc = DataLocation(self.config.node_id, endpoint, addr,
                                self._pool.rkey, len(data), resident=True)
             promoted[k] = loc
-            self._key_len[k] = len(data)
+            with self._key_len_lock:
+                self._key_len[k] = len(data)
             self._metrics.inc("promotes")
             out.append(loc)
         if promoted:
@@ -385,7 +393,8 @@ class PeerCacheStore(HiCacheStorage):
                     self._metrics.inc("disk_bytes_written", sizes[i])
                 except Exception as e:
                     logger.debug("peercache: disk write-through failed: %s", e)
-            self._key_len[key] = sizes[i]
+            with self._key_len_lock:
+                self._key_len[key] = sizes[i]
             entries[key] = DataLocation(
                 node_id=self.config.node_id,
                 rdma_endpoint=endpoint,
@@ -401,12 +410,14 @@ class PeerCacheStore(HiCacheStorage):
         for key in list(entries.keys()):
             al = self._pool.address_of(key)
             if al is None:
+                with self._key_len_lock:
+                    length = self._key_len.get(key, entries[key].length)
                 entries[key] = DataLocation(
                     node_id=self.config.node_id,
                     rdma_endpoint=endpoint,
                     remote_addr=0,
                     rkey=0,
-                    length=self._key_len.get(key, entries[key].length),
+                    length=length,
                     resident=False,
                 )
             else:
@@ -492,7 +503,7 @@ class PeerCacheStore(HiCacheStorage):
                 continue
             keys = [comp_keys[i] for i in idxs]
             try:
-                resp = self._data_rpc.get(endpoint).call("data_promote", {"keys": keys})
+                resp = self._data_rpc.call(endpoint, "data_promote", {"keys": keys})
                 newlocs = resp.get("locations", [])
                 for i, nl in zip(idxs, newlocs):
                     locations[i] = DataLocation.from_dict(nl) if nl else None
@@ -616,7 +627,8 @@ class PeerCacheStore(HiCacheStorage):
         return self.runtime.directory.exists([key])[0]
 
     def clear(self) -> None:
-        keys = set(self._key_len.keys())
+        with self._key_len_lock:
+            keys = set(self._key_len.keys())
         if self._pool is not None:
             keys.update(self._pool._entries.keys())  # snapshot
         keys = list(keys)
@@ -627,7 +639,8 @@ class PeerCacheStore(HiCacheStorage):
                 self._pool.remove(k)
             if self._disk is not None:
                 self._disk.remove(k)
-        self._key_len.clear()
+        with self._key_len_lock:
+            self._key_len.clear()
 
     def close(self) -> None:
         try:
