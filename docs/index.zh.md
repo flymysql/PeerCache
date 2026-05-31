@@ -3,7 +3,9 @@
 **面向 SGLang HiCache 的点对点 RDMA 零拷贝 L3 KV 缓存后端。**
 
 PeerCache 提供与 Mooncake 类似的跨节点 RDMA 零拷贝 KV 缓存共享能力，但
-**省去**了中心化的 `master` 与 `metadata` 服务。
+**省去**了中心化的 `master` 与 `metadata` 服务。它面向 **PD 分离（prefill/decode
+分离）的 SGLang 推理**：prefill worker 发布 KV 页面，decode worker 通过 RDMA 读回，
+且零 CPU 拷贝。
 
 ```mermaid
 flowchart LR

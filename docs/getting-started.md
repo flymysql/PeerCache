@@ -1,5 +1,10 @@
 # Getting Started
 
+PeerCache is the cross-node KV-cache transport for **PD-disaggregated SGLang
+inference** (separate prefill and decode workers). Prefill nodes publish KV pages;
+decode nodes read them back over RDMA. See [Architecture](architecture.md) for the
+data flow and copy counts.
+
 ## Requirements
 
 - Python 3.9+
@@ -65,23 +70,78 @@ python -m sglang.launch_server \
   }'
 ```
 
+## Deployment topology (PD disaggregation)
+
+A typical PD-disaggregated cluster:
+
+```mermaid
+flowchart LR
+    subgraph prefill [Prefill pool]
+      PF0["node-0 (discovery host + embedded meta)"]
+      PF1[node-1]
+    end
+    subgraph decode [Decode pool]
+      DC0[node-2]
+      DC1[node-3]
+    end
+    PF1 & DC0 & DC1 -. register/heartbeat .-> PF0
+    DC0 & DC1 ==>|RDMA READ KV| PF0 & PF1
+```
+
+Rules of thumb:
+
+- Run the **same** PeerCache backend config on every prefill and decode node, with
+  the **same `discovery_addr`** everywhere.
+- Pick one node's IP for `discovery_addr` (any reachable node — often a prefill
+  node). That node auto-hosts the embedded meta; nothing else to launch.
+- Size `global_segment_size` to how much published KV each node should keep
+  resident (it is sliced across `tp_size`); larger pool = higher hit rate, more
+  host RAM pinned.
+- Use `protocol: rdma` in production; `protocol: tcp` only for functional testing.
+- All nodes must be able to reach each other on the RDMA and control ports
+  (`rdma_port` / `control_port`, auto-assigned by default) plus the discovery port.
+
 ## extra_config reference
+
+Required keys (the dynamic-backend factory needs the first three):
 
 | key | default | meaning |
 |---|---|---|
 | `backend_name` | — | must be `peercache` (required by the dynamic factory) |
 | `module_path` | — | `peercache.store` (required) |
 | `class_name` | — | `PeerCacheStore` (required) |
-| `discovery_addr` | — | discovery host `host:port`, same on all nodes; the matching node auto-hosts meta (**required**) |
-| `meta_bind_host` | `0.0.0.0` | interface the embedded meta binds when this node is the discovery host |
-| `protocol` | `rdma` | `rdma` or `tcp` (fallback transport) |
-| `device_name` | `""` | RDMA device, e.g. `mlx5_0`; empty = first active |
+| `discovery_addr` | — | discovery host `host:port`, **same on all nodes**; the node whose IP matches auto-hosts meta (**required**) |
+
+RDMA / transport:
+
+| key | default | meaning |
+|---|---|---|
+| `protocol` | `rdma` | `rdma` (production) or `tcp` (fallback transport for testing) |
+| `device_name` | `""` | RDMA device, e.g. `mlx5_0`; empty = first active device |
 | `ib_port` | `1` | HCA port |
 | `gid_index` | `3` | GID index (RoCE v2 is typically 3) |
-| `global_segment_size` | `4gb` | published-pool size per node (sliced by tp_size) |
-| `vnodes` | `160` | virtual nodes per node on the hash ring |
-| `directory_replicas` | `1` | replicate directory entries for HA when `> 1` |
-| `rdma_port` / `control_port` | `0` | bind ports; `0` = auto-assign |
+
+Capacity / placement:
+
+| key | default | meaning |
+|---|---|---|
+| `global_segment_size` | `4gb` | published-pool size per node (accepts `int` or `"8gb"`/`"512mb"`; sliced across `tp_size`) |
+| `vnodes` | `160` | virtual nodes per node on the consistent-hash ring |
+| `directory_replicas` | `1` | replicate directory entries to N owners for HA when `> 1` |
+
+Networking / identity (rarely need changing):
+
+| key | default | meaning |
+|---|---|---|
+| `meta_bind_host` | `0.0.0.0` | interface the embedded meta binds when this node is the discovery host |
+| `local_hostname` | auto | IP advertised to peers; auto-resolved as the local IP that can reach `discovery_addr` |
+| `rdma_bind_host` | `0.0.0.0` | bind interface for the RDMA data plane |
+| `rdma_port` | `0` | RDMA bootstrap port; `0` = auto-assign |
+| `control_bind_host` | `0.0.0.0` | bind interface for the control RPC server |
+| `control_port` | `0` | control RPC port; `0` = auto-assign |
+| `node_id` | auto | stable node identifier; auto-generated from `local_hostname` + random suffix |
+| `heartbeat_interval` | `2.0` | seconds between membership heartbeats |
+| `member_ttl` | `6.0` | seconds before a silent node is pruned by the meta |
 
 ## TCP fallback (no RDMA)
 

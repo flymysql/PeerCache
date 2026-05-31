@@ -1,5 +1,36 @@
 # Architecture
 
+## Primary use case: PD-disaggregated SGLang inference
+
+PeerCache is built for **prefill/decode (PD) disaggregated** SGLang deployments,
+where prefill workers and decode workers run on different nodes. The prefill
+worker computes the prompt KV cache; the decode worker must obtain that KV cache
+to continue generation. PeerCache is the L3 storage that moves those KV pages
+between nodes with **RDMA zero-copy**, so decode reads the prefill KV directly
+out of remote host memory — no central master, no extra network copy of the KV.
+
+```mermaid
+flowchart LR
+    subgraph P [Prefill nodes - producers]
+      P0[Prefill worker<br/>set KV pages]
+    end
+    subgraph D [Decode nodes - consumers]
+      D0[Decode worker<br/>get KV pages]
+    end
+    P0 -->|"1 PUT location (tiny RPC)"| DIR[(Consistent-hash<br/>directory shards)]
+    D0 -->|"2 GET location (tiny RPC)"| DIR
+    P0 ==>|"3 one-sided RDMA READ (zero copy)"| D0
+```
+
+- The **KV data stays on the prefill node** (the producer). Only a small location
+  record is published to the directory.
+- The **decode node pulls** the KV via one-sided RDMA READ straight into its own
+  registered host buffer.
+- It also works for the non-disaggregated case (any node can be producer and
+  consumer); PD disaggregation is just the scenario it is tuned for.
+
+## Control plane vs data plane
+
 PeerCache splits cleanly into a **control plane** (Python) and a **data plane**
 (C++ / RDMA).
 
@@ -63,6 +94,31 @@ sequenceDiagram
 
 If the directory says the data lives on the reader itself, the read degrades to a
 local `memcpy` with no network involved.
+
+## Copy counts
+
+The whole point is to minimize copies of the (large) KV data. Counting only KV
+**data** movement (the directory RPCs carry a few dozen bytes and are ignored):
+
+| Operation | KV-data copies | What happens |
+|---|---|---|
+| `set` (write, producer) | **1 host memcpy** | page copied from SGLang's host KV buffer into the backend's published-pool MR (node-local, no network) |
+| `get` (remote read) | **0 CPU copies** | one-sided `IBV_WR_RDMA_READ`; the NIC DMAs bytes from the remote published pool straight into the reader's host KV buffer (true zero-copy) |
+| `get` (data already local) | **1 host memcpy** | published pool → host KV buffer; no network |
+
+So a producer→consumer KV transfer costs **one host-side memcpy on write + one
+zero-copy RDMA READ on read** — the data crosses the network exactly once, with
+no CPU involvement on either side during the transfer (the NIC does the DMA).
+
+### Why the one write-side memcpy is necessary
+
+SGLang's host KV buffer is the L2 tier and is **evicted/overwritten** by HiCache.
+If we published its address directly, a remote READ could land on a page that has
+since been reused (dangling reference / corruption). The backend-owned published
+pool is LRU-managed and decoupled from L2: publishing into it costs one memcpy but
+guarantees the `addr + rkey` stays valid until the pool itself evicts the entry
+(which also deletes the directory record). This is the standard trade-off for
+correctness; the network transfer itself remains zero-copy.
 
 ## Consistent-hash directory
 
