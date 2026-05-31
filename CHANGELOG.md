@@ -31,6 +31,11 @@ All notable changes to PeerCache are documented here. The format is based on
 ### Changed
 - Shared client state (`key → length` map) is now lock-guarded; broken pooled
   connections are closed instead of being reused.
+- **Default ports** now use the `31997-31999` band: metrics/dashboard stays on
+  `31997` and the discovery/meta service default moves from `9100` to `31998`
+  (`peercache-meta`, the `DiscoveryServer` default, and the `discovery_addr`
+  examples). `rdma_port`/`control_port` remain auto-assigned (`0`) so co-located
+  ranks do not collide; `31999` is reserved.
 
 ## [0.2.0] - 2026-05-31
 

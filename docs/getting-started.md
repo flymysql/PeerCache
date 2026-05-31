@@ -41,7 +41,7 @@ discovery service in-process; all other nodes connect to it as clients.
 So the only decision here is: which node's IP goes into `discovery_addr`.
 
 > Optional: if you'd rather run a dedicated discovery host (e.g. a node that does
-> not serve SGLang), start one with `peercache-meta --bind 0.0.0.0:9100` and point
+> not serve SGLang), start one with `peercache-meta --bind 0.0.0.0:31998` and point
 > `discovery_addr` at it. The embedded behavior is unaffected — whichever node's
 > IP equals `discovery_addr` and is free to bind the port will host it.
 
@@ -61,7 +61,7 @@ python -m sglang.launch_server \
     "backend_name": "peercache",
     "module_path":  "peercache.store",
     "class_name":   "PeerCacheStore",
-    "discovery_addr": "NODE0_IP:9100",
+    "discovery_addr": "NODE0_IP:31998",
     "protocol": "rdma",
     "device_name": "mlx5_0",
     "ib_port": 1,

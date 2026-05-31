@@ -27,7 +27,7 @@ startup and auto-hosts the discovery service in-process (no data, no metadata
 there — discovery only); all other nodes connect to it as clients.
 
 > Optional dedicated host: if you prefer a node that does not serve SGLang, run
-> `peercache-meta --bind 0.0.0.0:9100` there and point `discovery_addr` at it.
+> `peercache-meta --bind 0.0.0.0:31998` there and point `discovery_addr` at it.
 
 ## 3. Launch each SGLang server
 
@@ -42,7 +42,7 @@ python -m sglang.launch_server \
     "backend_name": "peercache",
     "module_path":  "peercache.store",
     "class_name":   "PeerCacheStore",
-    "discovery_addr": "NODE0_IP:9100",
+    "discovery_addr": "NODE0_IP:31998",
     "protocol": "rdma",
     "device_name": "mlx5_0",
     "ib_port": 1,
