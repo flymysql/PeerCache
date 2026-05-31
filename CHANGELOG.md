@@ -4,6 +4,17 @@ All notable changes to PeerCache are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- **Benchmark harness** (`benchmarks/`): a reproducible PeerCache-vs-Mooncake
+  comparison that drives, under one workload, PeerCache's data-plane
+  (`transport-read`), PeerCache's full store path (`store-get`), and Mooncake's
+  official `transfer_engine_bench`. Runs over RDMA (publishable numbers) or the
+  TCP fallback (plumbing validation). Emits JSON + Markdown reports, ships a
+  committed single-host TCP reference baseline, and documents the RDMA-hardware
+  reproduction recipe. New `Benchmarks` docs page (EN/中文) and a `bench` extra.
+
 ## [0.2.0] - 2026-05-31
 
 ### Added

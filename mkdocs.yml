@@ -70,6 +70,7 @@ plugins:
             Getting Started: 快速开始
             Architecture: 架构
             SDK Reference: SDK 参考
+            Benchmarks: 性能基准测试
             Changelog: 更新日志
 
 extra:
