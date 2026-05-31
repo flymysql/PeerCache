@@ -10,12 +10,14 @@ peak** throughput.
 No repo clone and no `PYTHONPATH` needed — after `pip install peercache` the
 commands are on your `PATH`:
 
-| command | what it runs |
+A single command, `peercache-bench`, with subcommands:
+
+| subcommand | what it runs |
 |---|---|
-| `peercache-bench` | systematic SGLang-HiCache benchmark (subcommands below) |
-| `peercache-bench-micro` | low-level data-plane microbench |
-| `peercache-bench-mooncake` | wraps Mooncake's official `transfer_engine_bench` |
-| `peercache-bench-compare` | PeerCache-vs-Mooncake sweep |
+| `latency` / `throughput` / `saturation` / `suite` | systematic SGLang-HiCache benchmark |
+| `micro` | low-level data-plane microbench |
+| `mooncake` | wraps Mooncake's official `transfer_engine_bench` |
+| `compare` | PeerCache-vs-Mooncake sweep |
 
 !!! danger "RDMA-first — read before quoting any number"
     PeerCache's value is **RDMA one-sided READ**. Headline numbers must be
@@ -101,7 +103,7 @@ page size, batch, concurrency) next to any figure.
 ## Optional: compare against Mooncake
 
 ```bash
-peercache-bench-compare --protocol rdma --device-name mlx5_0 \
+peercache-bench compare --protocol rdma --device-name mlx5_0 \
     --block-sizes 4k,16k,64k,256k,1m --duration 10 --tag rdma
 ```
 
