@@ -2,6 +2,15 @@
 
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- **Benchmark harness** (`benchmarks/`): a reproducible PeerCache-vs-Mooncake
+  comparison driving PeerCache's data plane, its full store path, and Mooncake's
+  official `transfer_engine_bench` under one workload. Runs over RDMA or the TCP
+  fallback; emits JSON + Markdown reports. See the [Benchmarks](benchmarks.md)
+  page.
+
 ## [0.2.0] - 2026-05-31
 
 ### Added

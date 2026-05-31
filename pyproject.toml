@@ -31,5 +31,5 @@ build-dir = "build/{wheel_tag}"
 PEERCACHE_NO_RDMA = "OFF"
 
 [tool.pytest.ini_options]
-pythonpath = ["python"]
+pythonpath = ["python", "benchmarks"]
 testpaths = ["tests"]

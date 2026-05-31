@@ -105,6 +105,24 @@ pip install pytest
 PYTHONPATH=python pytest tests/ -v
 ```
 
+## Benchmarks
+
+A reproducible harness in [`benchmarks/`](benchmarks/) measures PeerCache's data
+plane and compares it, under an identical workload, with Mooncake's official
+`transfer_engine_bench`. It runs over RDMA (real numbers) or the TCP fallback
+(plumbing validation only).
+
+```bash
+PYTHONPATH=python:benchmarks python benchmarks/run_baseline.py \
+    --protocol tcp --block-sizes 4k,64k,1m --duration 5 --tag sandbox
+```
+
+> **Do not quote TCP/loopback numbers as RDMA performance.** Both projects are
+> RDMA-first; publishable figures must be measured on RDMA hardware. See
+> [`benchmarks/README.md`](benchmarks/README.md) and the
+> [Benchmarks docs](https://flymysql.github.io/PeerCache/benchmarks/) for the
+> methodology, the committed sandbox baseline, and the RDMA reproduction recipe.
+
 ## Maintainer setup (one-time)
 
 - **GitHub Pages**: Settings → Pages → Build and deployment → Source = **GitHub
