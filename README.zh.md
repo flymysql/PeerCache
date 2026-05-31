@@ -130,10 +130,10 @@ IP 与之匹配的节点会在进程内自动启动发现服务。
 python -m sglang.launch_server --enable-hierarchical-cache \
   --hicache-storage-backend dynamic \
   --hicache-storage-backend-extra-config \
-  '{"backend_name":"peercache","module_path":"peercache.store","class_name":"PeerCacheStore","discovery_addr":"NODE0_IP:9100","protocol":"rdma","device_name":"mlx5_0","global_segment_size":"4gb"}'
+  '{"backend_name":"peercache","module_path":"peercache.store","class_name":"PeerCacheStore","discovery_addr":"NODE0_IP:31998","protocol":"rdma","device_name":"mlx5_0","global_segment_size":"4gb"}'
 ```
 
-（也可以用 `peercache-meta --bind 0.0.0.0:9100` 单独运行一个 meta，如果你更喜欢专用的发现主机。）
+（也可以用 `peercache-meta --bind 0.0.0.0:31998` 单独运行一个 meta，如果你更喜欢专用的发现主机。）
 
 详见 [examples/sglang_launch.md](examples/sglang_launch.md)。
 
