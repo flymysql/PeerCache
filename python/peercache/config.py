@@ -39,6 +39,10 @@ class PeerCacheConfig:
     device_name: str = ""  # e.g. "mlx5_0"; empty -> first active device
     ib_port: int = 1
     gid_index: int = 3
+    # Number of RC QP "channels" pooled per peer. Each channel has its own CQ,
+    # so more channels let more reader threads post/poll a given peer fully in
+    # parallel (raise for high-concurrency reads against one data node).
+    max_channels_per_peer: int = 16
 
     # Backend-owned published pool size (host memory registered as MR).
     global_segment_size: int = 4 << 30
@@ -46,6 +50,11 @@ class PeerCacheConfig:
     # Consistent-hash directory.
     vnodes: int = 160  # virtual nodes per physical node
     directory_replicas: int = 1  # >1 replicates directory entries for HA
+    # Cache resolved *resident* read locations for this many seconds to skip the
+    # per-batch directory lookup (a cross-node RPC) on hot, static working sets.
+    # 0 disables the cache. Entries are invalidated immediately on a read miss
+    # and are TTL-bounded, so a stale (evicted) location self-heals.
+    directory_read_cache_ttl: float = 0.0
 
     # Default fixed ports use the 31997-31999 band:
     #   31997 -> metrics/dashboard HTTP (metrics_port)
@@ -107,9 +116,11 @@ class PeerCacheConfig:
             "device_name",
             "ib_port",
             "gid_index",
+            "max_channels_per_peer",
             "global_segment_size",
             "vnodes",
             "directory_replicas",
+            "directory_read_cache_ttl",
             "local_hostname",
             "rdma_bind_host",
             "rdma_port",
