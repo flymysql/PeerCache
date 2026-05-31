@@ -2,6 +2,14 @@
 
 本项目遵循 [语义化版本](https://semver.org/)。
 
+## [未发布]
+
+### 新增
+- **基准测试框架**（`benchmarks/`）：可复现的 PeerCache 与 Mooncake 对比，在同一负载下
+  分别驱动 PeerCache 的数据平面、完整 store 路径，以及 Mooncake 官方的
+  `transfer_engine_bench`。支持 RDMA 与 TCP 回退，输出 JSON + Markdown 报告。详见
+  [性能基准测试](benchmarks.md) 页面。
+
 ## [0.2.0] - 2026-05-31
 
 ### 新增
