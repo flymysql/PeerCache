@@ -1,143 +1,143 @@
-# PeerCache vs Mooncake benchmark harness
+# PeerCache benchmark harness
 
-A reproducible harness for measuring PeerCache's KV-cache data plane and
-comparing it, under an identical workload, with
-[Mooncake](https://github.com/kvcache-ai/Mooncake)'s official
-`transfer_engine_bench`.
+A systematic, reproducible harness that drives PeerCache's `HiCacheStorage`
+interface exactly as **SGLang HiCache** does, and reports the performance
+numbers you can publish: throughput (pages/s, tokens/s, GB/s) and latency tail
+(p50/p95/p99/p999/max) across a sweep of **thread models** (concurrency),
+including the full-load **saturation / peak** throughput.
 
 > [!IMPORTANT]
-> **Read this before quoting any number.** The benchmark measures whatever
-> fabric you run it on. Both PeerCache and Mooncake are built around
-> **RDMA one-sided READ**; their headline performance only shows up on real
-> RDMA hardware (RoCE/InfiniBand). The harness *also* runs over a TCP fallback
-> so it can be exercised on a laptop / CI / a GPU-less VM — but **TCP numbers
-> are for plumbing validation only and must never be presented as RDMA
-> performance or used in marketing.** See [Caveats](#caveats).
+> **RDMA-first.** PeerCache's value is RDMA one-sided READ; headline numbers must
+> be measured with `--protocol rdma` on a host with an RDMA NIC. A pure-Python
+> TCP fallback exists in the transport for *functional smoke testing only* (CI,
+> laptops). **TCP runs are not a performance scenario and must not be published.**
 
-## What it measures
+## What it models (PD-disaggregation)
 
-For each block size in a sweep, three rows are produced:
+```
+prefill node  --batch_set_v1-->  publish KV pages   (write / offload)
+decode node   --batch_exists-->  probe cached prefix (lookup)
+              --batch_get_v1-->  load pages over RDMA (read / prefetch, zero copy)
+```
 
-| row | system | what runs | what it represents |
-|---|---|---|---|
-| `transport-read` | PeerCache | two `Transport`s, batched one-sided READ | PeerCache's raw data-plane read |
-| `store-get` | PeerCache | 2-node `PeerCacheStore`: `batch_set_v1` then `batch_get_v1` | the full HiCache path SGLang drives (directory GET + remote READ) |
-| `transfer-engine` | Mooncake | official `transfer_engine_bench` (initiator reads from target) | Mooncake's raw data-plane read |
+The harness brings up an embedded discovery service plus two `PeerCacheStore`
+nodes in one process: a **producer** (prefill) publishes pages and a
+**consumer** (decode) reads them back across the fabric, exercising the full
+path SGLang drives (directory lookup + RDMA READ into the registered host
+buffer). KV page layout is faithful to SGLang:
 
-Reported per row: throughput (GB/s, 10⁹ bytes/s — same unit as Mooncake's
-default), ops/s, and (for PeerCache) per-op latency p50/p90/p99.
+- `--layout mla` — 1 storage object per page (`_<pp>_k`).
+- `--layout mha` — 2 objects per page (`_<tp>_k`, `_<tp>_v`), interleaved per slot.
 
-## Layout
+## Files
 
 ```
 benchmarks/
-  common.py          # workload, latency percentiles, result schema, renderers
-  bench_peercache.py # PeerCache transport-read + store-get
-  bench_mooncake.py  # wraps Mooncake's transfer_engine_bench (subprocess)
-  run_baseline.py    # orchestrates the sweep, writes results/*.json + *.md
-  results/           # generated artifacts (committed sandbox baseline lives here)
+  common.py          # workload, HDR-style latency histogram, result schema, renderers
+  sglang_sim.py      # SGLang HostKVCache stand-in (MLA/MHA) + PD-disaggregated Cluster
+  bench_hicache.py   # the systematic benchmark: latency/throughput/saturation/suite
+  bench_peercache.py # low-level data-plane microbench (transport-read / store-get)
+  bench_mooncake.py  # optional: wraps Mooncake's transfer_engine_bench
+  run_baseline.py    # optional: PeerCache-vs-Mooncake comparison sweep
+  results/           # JSON + Markdown artifacts (git-ignored; force-add a baseline)
 ```
+
+## Metrics
+
+| metric | meaning |
+|---|---|
+| **page** | one logical KV page (1 object for MLA, k+v for MHA) |
+| **pages/s** | logical KV pages transferred per second |
+| **tokens/s** | `pages/s × --tokens-per-page` (set via your model's page token count) |
+| **GB/s** | payload bytes/s (10⁹), counting all components actually moved |
+| **p50…p999, max** | per **batch call** latency distribution (one `batch_*` call) |
+| **hit%** | fraction of requested pages found (read path) |
+| **PEAK** | the concurrency row with the highest sustained throughput (saturation) |
+
+For per-**page** latency, use the `latency` mode (batch size 1).
 
 ## Install
 
 ```bash
-# PeerCache (RDMA build on a host with libibverbs/librdmacm)
-pip install .
-
-# PeerCache without RDMA (TCP fallback only)
-pip install -e . --config-settings=cmake.define.PEERCACHE_NO_RDMA=ON
-
-# Mooncake (only needed for the comparison rows)
-pip install mooncake-transfer-engine
+pip install .                       # RDMA build (needs libibverbs / librdmacm)
+pip install mooncake-transfer-engine  # only for the optional comparison
 ```
 
-## Run — sandbox (TCP, no RDMA)
+## Run on RDMA hardware (publishable numbers)
 
-This is what was used to produce the committed baseline. It validates the
-harness end-to-end; **the numbers are not representative of RDMA**.
-
-```bash
-PYTHONPATH=python:benchmarks python benchmarks/run_baseline.py \
-    --protocol tcp \
-    --block-sizes 4k,16k,64k,256k,1m \
-    --batch-size 64 --duration 5 --warmup 1 --tag sandbox
-```
-
-If Mooncake's wheel can't load its CUDA/RDMA shared objects on a GPU-less box,
-either add `--skip-mooncake`, or provide stub libraries (the wheel links
-`libcuda.so.1`, `libcudart.so.12`, `libibverbs.so.1` even for `protocol=tcp`):
+Find your device with `ibv_devices`. Single-host run (two engines do RDMA
+loopback through the NIC):
 
 ```bash
-# libcudart from pip; libcuda + ibverbs via distro / a tiny stub
-pip install nvidia-cuda-runtime-cu12
-sudo apt-get install -y rdma-core libibverbs1
-export LD_LIBRARY_PATH=/path/to/cudart/lib:/path/to/stubs:$LD_LIBRARY_PATH
-```
-
-## Run — RDMA hardware (this is what produces publishable numbers)
-
-You need two nodes (or two NICs) on a RoCE/InfiniBand fabric. Run the same
-sweep with `--protocol rdma` and your device name (`ibv_devices` to list).
-
-PeerCache spins up its own two in-process engines bound to the local device, so
-the single command works on one RDMA node:
-
-```bash
-PYTHONPATH=python:benchmarks python benchmarks/run_baseline.py \
-    --protocol rdma --device-name mlx5_0 \
-    --block-sizes 4k,16k,64k,256k,1m,4m \
-    --batch-size 64 --threads 1 --mooncake-threads 16 \
+PYTHONPATH=python:benchmarks python benchmarks/bench_hicache.py suite \
+    --device-name mlx5_0 --layout mla \
+    --page-size 131072 --tokens-per-page 64 \
+    --batch-size 32 --concurrencies 1,2,4,8,16,32,64 \
     --duration 10 --warmup 2 --tag rdma
 ```
 
-For a true **cross-node** Mooncake number (initiator and target on different
-hosts), drive Mooncake's bench directly so each side binds its own NIC:
+This writes `results/hicache-suite-rdma-<ts>.{json,md}` containing:
+
+1. single-op **latency baseline** (get/set/exists, batch 1, concurrency 1),
+2. **get** saturation sweep (read/prefetch) with the PEAK row,
+3. **set** saturation sweep (write/offload) with the PEAK row,
+4. **exists** saturation sweep (directory lookup).
+
+Other modes:
 
 ```bash
-# node A (target / producer)
-transfer_engine_bench -mode=target  -protocol=rdma -device_name=mlx5_0 \
-    -metadata_server=http://<meta-host>:8080/metadata \
-    -local_server_name=<A-ip>:13300 -use_vram=false -gpu_id=-1
-
-# node B (initiator / consumer)
-transfer_engine_bench -mode=initiator -protocol=rdma -device_name=mlx5_0 \
-    -metadata_server=http://<meta-host>:8080/metadata \
-    -local_server_name=<B-ip>:13301 -segment_id=<A-ip>:13300 \
-    -operation=read -block_size=65536 -batch_size=64 -threads=16 -duration=10
+# one thread model, one op
+python benchmarks/bench_hicache.py throughput --op get --concurrency 16 --device-name mlx5_0 ...
+# concurrency sweep for one op
+python benchmarks/bench_hicache.py saturation --op set --concurrencies 1,4,16,64 --device-name mlx5_0 ...
+# pure single-op latency tail
+python benchmarks/bench_hicache.py latency --device-name mlx5_0 ...
 ```
 
-and run PeerCache cross-node via two `PeerCacheStore` processes pointed at one
-`discovery_addr` (see `examples/sglang_launch.md`), publishing on one node and
-`batch_get_v1` on the other.
+### True cross-node (two hosts)
+
+The in-process cluster uses NIC loopback. For a real two-host number, run a
+producer `PeerCacheStore` on node A and a consumer on node B pointed at one
+`discovery_addr` (see `examples/sglang_launch.md`): A publishes a key range with
+`batch_set_v1`, B drives `batch_exists` + `batch_get_v1`. The same `common.py`
+histogram/result helpers apply.
 
 ## Knobs
 
 | flag | meaning | default |
 |---|---|---|
-| `--protocol` | `tcp` or `rdma` | `tcp` |
-| `--device-name` | RDMA device (rdma only) | `""` |
-| `--block-sizes` | comma list, accepts `4k`,`1m` | `4096,65536,1048576` |
-| `--batch-size` | reads per batch | `64` |
-| `--threads` | PeerCache submit threads | `1` |
-| `--mooncake-threads` | Mooncake submit threads | `4` |
-| `--duration` / `--warmup` | seconds | `5` / `1` |
-| `--skip-mooncake` / `--skip-store` | drop those rows | off |
+| `--protocol` | `rdma` (publishable) or `tcp` (smoke only) | `rdma` |
+| `--device-name` | RDMA device (e.g. `mlx5_0`) | `""` |
+| `--ib-port` / `--gid-index` | RDMA port / GID | `1` / `3` |
+| `--layout` | `mla` or `mha` | `mla` |
+| `--page-size` | bytes per component object (k or v) | `131072` |
+| `--tokens-per-page` | tokens per page (for tokens/s) | `64` |
+| `--batch-size` | pages per batch call | `32` |
+| `--concurrencies` | thread-model sweep | `1,2,4,8,16,32` |
+| `--duration` / `--warmup` | seconds | `10` / `2` |
+| `--working-set` | distinct pages for get/exists | `4096` |
+| `--disk` | enable disk write-through tier | off |
+| `--max-bytes` | host-memory budget guard | `8 GiB` |
 | `--tag` | output filename suffix | `""` |
+
+## Optional: compare against Mooncake
+
+```bash
+PYTHONPATH=python:benchmarks python benchmarks/run_baseline.py \
+    --protocol rdma --device-name mlx5_0 \
+    --block-sizes 4k,16k,64k,256k,1m --duration 10 --tag rdma
+```
+
+This runs PeerCache's data-plane microbench and Mooncake's official
+`transfer_engine_bench` under matched block sizes. See `bench_mooncake.py` for
+two-host commands.
 
 ## Caveats
 
-1. **TCP ≠ RDMA.** PeerCache's TCP transport is a *pure-Python validation
-   fallback*; its production fast path is the C++ libibverbs one-sided READ,
-   which is disabled in a no-RDMA build. Mooncake's TCP backend is likewise not
-   its optimized path. TCP-loopback ranking does **not** predict RDMA ranking.
-2. **Loopback ≠ network.** Sandbox runs use `127.0.0.1` on one host (no NIC, no
-   wire). RRDMA runs should be cross-node to capture real fabric behaviour.
-3. **Different submission models.** PeerCache's TCP `batch_read` is synchronous
-   per op on a single connection; Mooncake's bench is multi-threaded by design.
-   Keep `--threads` / `--mooncake-threads` in mind when comparing — they are
-   reported in every row.
-4. **`store-get` vs `transfer-engine` are not identical paths.** `store-get`
-   includes directory lookup + pool bookkeeping; `transfer-engine` is pure
-   transport. `transport-read` is the closest apples-to-apples PeerCache row.
-5. Numbers vary with CPU, NUMA, NIC, MTU, and concurrency. Always publish the
-   `host` block from the JSON artifact alongside any figure.
+1. **TCP ≠ RDMA, and TCP is not a scenario here.** Use it only to check the code
+   runs; never publish TCP numbers.
+2. **Loopback ≠ network.** Single-host RDMA uses NIC loopback; for fabric
+   behaviour run cross-node.
+3. **Latency is per batch call** unless you use `latency` mode (batch 1).
+4. Always publish the `host`/`meta` blocks from the JSON artifact next to any
+   figure (device, layout, page size, batch, concurrency).
