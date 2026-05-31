@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-rdma-build:
+    name: build (libibverbs) + tests
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install RDMA dev headers and build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libibverbs-dev librdmacm-dev cmake ninja-build
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install (builds the C++ extension) + test deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install ".[test]"
+
+      - name: Verify the extension built with RDMA support
+        run: |
+          python -c "import _peercache; assert _peercache.HAS_RDMA, 'expected RDMA build'; print('HAS_RDMA', _peercache.HAS_RDMA)"
+
+      - name: Run tests (TCP fallback; runners have no RDMA device)
+        run: pytest -q
+
+  test-no-rdma:
+    name: build (PEERCACHE_NO_RDMA) + tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install without RDMA (stub extension + TCP fallback)
+        run: |
+          python -m pip install --upgrade pip
+          pip install ".[test]" --config-settings=cmake.define.PEERCACHE_NO_RDMA=ON
+      - name: Verify stub build falls back to TCP
+        run: |
+          python -c "import _peercache; assert _peercache.HAS_RDMA is False; print('stub build OK')"
+      - name: Run tests
+        run: pytest -q

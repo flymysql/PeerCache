@@ -1,0 +1,72 @@
+#include "peercache/transfer_engine.h"
+
+#include <infiniband/verbs.h>
+
+#include <unordered_map>
+
+namespace peercache {
+
+TransferEngine::TransferEngine(const std::string& device_name, uint8_t ib_port,
+                               int gid_index, const std::string& bind_host,
+                               uint16_t bind_port)
+    : bind_host_(bind_host) {
+  ctx_ = std::make_unique<RdmaContext>(device_name, ib_port, gid_index);
+  conn_ = std::make_unique<ConnectionManager>(ctx_.get(), bind_host, bind_port);
+  bind_port_ = conn_->start();
+}
+
+TransferEngine::~TransferEngine() = default;
+
+MrHandle TransferEngine::register_mr(uint64_t addr, uint64_t length) {
+  return ctx_->register_mr(addr, length);
+}
+
+void TransferEngine::deregister_mr(uint64_t addr) { ctx_->deregister_mr(addr); }
+
+std::vector<bool> TransferEngine::batch_read(
+    const std::vector<ReadRequest>& reqs) {
+  std::vector<bool> ok(reqs.size(), false);
+
+  // Group request indices by destination peer so we can reuse one QP per peer.
+  std::unordered_map<std::string, std::vector<size_t>> by_peer;
+  for (size_t i = 0; i < reqs.size(); ++i) {
+    by_peer[reqs[i].remote_node].push_back(i);
+  }
+
+  // Post everything (wr_id == request index) onto the shared CQ, then drain.
+  size_t posted = 0;
+  for (auto& kv : by_peer) {
+    RdmaEndpoint* ep = conn_->get_or_connect(kv.first);
+    if (!ep) continue;  // leave those requests as failed
+    for (size_t idx : kv.second) {
+      const ReadRequest& r = reqs[idx];
+      uint32_t lkey = ctx_->lkey_for(r.local_addr);
+      if (lkey == 0) continue;  // destination not in a registered MR
+      if (ep->post_read(r.local_addr, lkey, r.remote_addr, r.rkey, r.length,
+                        static_cast<uint64_t>(idx))) {
+        ++posted;
+      }
+    }
+  }
+
+  // Drain `posted` completions from the shared CQ, marking success by wr_id.
+  ibv_cq* cq = ctx_->cq();
+  size_t seen = 0;
+  ibv_wc wc;
+  while (seen < posted) {
+    int n = ibv_poll_cq(cq, 1, &wc);
+    if (n < 0) break;
+    if (n == 0) continue;
+    ++seen;
+    if (wc.status == IBV_WC_SUCCESS && wc.wr_id < reqs.size()) {
+      ok[wc.wr_id] = true;
+    }
+  }
+  return ok;
+}
+
+std::string TransferEngine::local_endpoint() const {
+  return bind_host_ + ":" + std::to_string(bind_port_);
+}
+
+}  // namespace peercache
