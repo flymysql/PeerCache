@@ -7,6 +7,13 @@ All notable changes to PeerCache are documented here. The format is based on
 ## [Unreleased]
 
 ### Added
+- **Concurrent multi-threaded reads/writes** on both client and server. The RDMA
+  data plane now uses a **per-peer channel pool**, where each channel is an RC QP
+  with its own private completion queue, so concurrent reader threads post/poll on
+  independent CQs with no shared-CQ contention (capped by the new
+  `max_channels_per_peer`, default 16). The TCP fallback gains a matching
+  per-endpoint socket pool, and the control-plane RPC pool now leases a connection
+  per in-flight call so directory lookups/promotes run in parallel.
 - **Benchmark harness** (`benchmarks/`): a systematic, RDMA-first benchmark
   that drives PeerCache's `HiCacheStorage` interface exactly as SGLang HiCache
   does (PD-disaggregated `batch_set_v1` / `batch_exists` / `batch_get_v1`) via a
@@ -20,6 +27,10 @@ All notable changes to PeerCache are documented here. The format is based on
   PYTHONPATH. Includes an optional Mooncake `transfer_engine_bench` comparison and
   a low-level data-plane microbench. New `Benchmarks` docs page (EN/中文) and a
   `bench` extra. The TCP fallback is for functional smoke testing only.
+
+### Changed
+- Shared client state (`key → length` map) is now lock-guarded; broken pooled
+  connections are closed instead of being reused.
 
 ## [0.2.0] - 2026-05-31
 

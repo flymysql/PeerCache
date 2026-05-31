@@ -106,7 +106,7 @@ class DirectoryClient:
             if endpoint is None:
                 continue
             try:
-                self._pool.get(endpoint).call("dir_put", {"entries": node_entries})
+                self._pool.call(endpoint, "dir_put", {"entries": node_entries})
             except Exception:
                 continue  # best-effort publish; missing entry == cache miss later
 
@@ -132,7 +132,7 @@ class DirectoryClient:
             if endpoint is None:
                 continue
             try:
-                resp = self._pool.get(endpoint).call("dir_get", {"keys": group})
+                resp = self._pool.call(endpoint, "dir_get", {"keys": group})
                 raw = resp.get("locations", [])
                 return [DataLocation.from_dict(r) if r else None for r in raw]
             except Exception:
@@ -146,7 +146,7 @@ class DirectoryClient:
             if endpoint is None:
                 continue
             try:
-                resp = self._pool.get(endpoint).call("dir_exists", {"keys": group})
+                resp = self._pool.call(endpoint, "dir_exists", {"keys": group})
                 for k, ex in zip(group, resp.get("exists", [])):
                     result[k] = bool(ex)
             except Exception:
@@ -163,6 +163,6 @@ class DirectoryClient:
             if endpoint is None:
                 continue
             try:
-                self._pool.get(endpoint).call("dir_delete", {"keys": group})
+                self._pool.call(endpoint, "dir_delete", {"keys": group})
             except Exception:
                 continue

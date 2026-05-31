@@ -6,10 +6,6 @@
 
 namespace peercache {
 
-namespace {
-constexpr int kCqDepth = 4096;
-}
-
 RdmaContext::RdmaContext(const std::string& device_name, uint8_t ib_port,
                          int gid_index)
     : ib_port_(ib_port), gid_index_(gid_index) {
@@ -43,9 +39,6 @@ RdmaContext::RdmaContext(const std::string& device_name, uint8_t ib_port,
   pd_ = ibv_alloc_pd(ctx_);
   if (!pd_) throw std::runtime_error("peercache: ibv_alloc_pd failed");
 
-  cq_ = ibv_create_cq(ctx_, kCqDepth, nullptr, nullptr, 0);
-  if (!cq_) throw std::runtime_error("peercache: ibv_create_cq failed");
-
   if (ibv_query_port(ctx_, ib_port_, &port_attr_) != 0) {
     throw std::runtime_error("peercache: ibv_query_port failed");
   }
@@ -63,7 +56,6 @@ RdmaContext::~RdmaContext() {
     for (auto& kv : mrs_) ibv_dereg_mr(kv.second.second);
     mrs_.clear();
   }
-  if (cq_) ibv_destroy_cq(cq_);
   if (pd_) ibv_dealloc_pd(pd_);
   if (ctx_) ibv_close_device(ctx_);
 }
