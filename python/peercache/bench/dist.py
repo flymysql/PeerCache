@@ -40,11 +40,12 @@ Notes
 from __future__ import annotations
 
 import argparse
+import multiprocessing as mp
 import os
 import signal
 import time
 from types import SimpleNamespace
-from typing import List
+from typing import List, Tuple
 
 from peercache.bench.common import (
     BaselineReport,
@@ -80,6 +81,8 @@ def _make_store(args, node_id: str, seg_bytes: int):
         "disk_enabled": False,
         "ib_port": args.ib_port,
         "gid_index": args.gid_index,
+        "max_channels_per_peer": getattr(args, "max_channels", 16),
+        "directory_read_cache_ttl": getattr(args, "dir_cache_ttl", 0.0),
     }
     if getattr(args, "local_host", ""):
         extra["local_hostname"] = args.local_host
@@ -135,8 +138,9 @@ def run_serve(args) -> None:
         f"page={human_bytes(args.page_size)} working_set={ws}",
         flush=True,
     )
-    print("[serve] waiting for a reader to join the ring ...", flush=True)
-    _wait_ring(store, 2, args.connect_timeout)
+    readers = max(1, int(getattr(args, "readers", 1)))
+    print(f"[serve] waiting for {readers} reader(s) to join the ring ...", flush=True)
+    _wait_ring(store, 1 + readers, args.connect_timeout)
 
     pool = HostKVPool(args.page_size, ws, layout=layout)
     store.register_mem_pool_host(pool)
@@ -168,100 +172,104 @@ def run_serve(args) -> None:
 # --------------------------------------------------------------------------- #
 # drive: consumer / driver node (the actual benchmark)
 # --------------------------------------------------------------------------- #
-def run_drive(args) -> None:
-    layout = args.layout
-    pt = _page_total(args.page_size, layout)
-    comps = 1 if layout == "mla" else 2
+# One sweep point: (conc, ops, bytes, pages, hits, calls, Histogram, elapsed).
+SweepPoint = Tuple[int, int, int, int, int, int, Histogram, float]
+
+
+def _make_worker(store, args, keys):
+    """Build the per-thread worker closure for the configured op."""
     bs = args.batch_size
     ws = args.working_set
-    concs = _csv_ints(args.concurrencies)
-    max_conc = max(concs)
-    consumer_slots = max_conc * bs
-    seg_bytes = args.global_segment_size or int(max(ws, consumer_slots) * pt * 1.3)
+    pt = _page_total(args.page_size, args.layout)
+    comps = 1 if args.layout == "mla" else 2
 
-    store = _make_store(args, args.node_id or "pcbench-consumer", seg_bytes)
-    print(
-        f"[drive] node up: rdma={store.runtime.local_rdma_endpoint} "
-        f"discovery={args.discovery_addr} op={args.op}",
-        flush=True,
-    )
-    _wait_ring(store, 2, args.connect_timeout)
+    if args.op == "get":
+        def worker(tid, warm_end, end):
+            base = tid * bs
+            idxs = list(range(base, base + bs))
+            hist = Histogram()
+            ops = by = pages = hits = calls = 0
+            r = 0
+            measuring = False
+            while True:
+                now = time.perf_counter()
+                if now >= end:
+                    break
+                if not measuring and now >= warm_end:
+                    measuring = True
+                kstart = (tid * 7919 + r * bs) % ws
+                kk = [keys[(kstart + j) % ws] for j in range(bs)]
+                t0 = time.perf_counter()
+                oks = store.batch_get_v1(kk, idxs)
+                t1 = time.perf_counter()
+                n = sum(1 for o in oks if o)
+                r += 1
+                if measuring:
+                    calls += 1
+                    hist.record(t1 - t0)
+                    hits += n
+                    ops += n * comps
+                    pages += n
+                    by += n * pt
+            return ops, by, pages, hits, calls, hist
+    else:  # exists
+        def worker(tid, warm_end, end):
+            hist = Histogram()
+            pages = hits = calls = 0
+            r = 0
+            measuring = False
+            while True:
+                now = time.perf_counter()
+                if now >= end:
+                    break
+                if not measuring and now >= warm_end:
+                    measuring = True
+                kstart = (tid * 7919 + r * bs) % ws
+                kk = [keys[(kstart + j) % ws] for j in range(bs)]
+                t0 = time.perf_counter()
+                n = store.batch_exists(kk)
+                t1 = time.perf_counter()
+                r += 1
+                if measuring:
+                    calls += 1
+                    hist.record(t1 - t0)
+                    hits += n
+                    pages += bs
+            return 0, 0, pages, hits, calls, hist
+    return worker
 
-    pool = HostKVPool(args.page_size, consumer_slots, layout=layout)
-    store.register_mem_pool_host(pool)
-    keys = [f"{KEY_PREFIX}/{i}" for i in range(ws)]
-    print("[drive] waiting for the producer's working set ...", flush=True)
-    _wait_published(store, keys, args.connect_timeout)
-    print("[drive] producer ready; starting sweep.", flush=True)
 
-    report = BaselineReport()
-    report.meta = {
-        "mode": "dist", "role": "drive", "op": args.op,
-        "protocol": args.protocol, "device": args.device_name or "-",
-        "layout": layout, "page_size": args.page_size, "batch_size": bs,
-        "tokens_per_page": args.tokens_per_page, "working_set": ws,
-        "remote": args.discovery_addr,
-    }
-
-    rows = []
+def _sweep(store, args, keys, concs) -> List[SweepPoint]:
+    points: List[SweepPoint] = []
     for conc in concs:
-        if args.op == "get":
-            def worker(tid, warm_end, end):
-                base = tid * bs
-                idxs = list(range(base, base + bs))
-                hist = Histogram()
-                ops = by = pages = hits = calls = 0
-                r = 0
-                measuring = False
-                while True:
-                    now = time.perf_counter()
-                    if now >= end:
-                        break
-                    if not measuring and now >= warm_end:
-                        measuring = True
-                    kstart = (tid * 7919 + r * bs) % ws
-                    kk = [keys[(kstart + j) % ws] for j in range(bs)]
-                    t0 = time.perf_counter()
-                    oks = store.batch_get_v1(kk, idxs)
-                    t1 = time.perf_counter()
-                    n = sum(1 for o in oks if o)
-                    r += 1
-                    if measuring:
-                        calls += 1
-                        hist.record(t1 - t0)
-                        hits += n
-                        ops += n * comps
-                        pages += n
-                        by += n * pt
-                return ops, by, pages, hits, calls, hist
-        else:  # exists
-            def worker(tid, warm_end, end):
-                hist = Histogram()
-                pages = hits = calls = 0
-                r = 0
-                measuring = False
-                while True:
-                    now = time.perf_counter()
-                    if now >= end:
-                        break
-                    if not measuring and now >= warm_end:
-                        measuring = True
-                    kstart = (tid * 7919 + r * bs) % ws
-                    kk = [keys[(kstart + j) % ws] for j in range(bs)]
-                    t0 = time.perf_counter()
-                    n = store.batch_exists(kk)
-                    t1 = time.perf_counter()
-                    r += 1
-                    if measuring:
-                        calls += 1
-                        hist.record(t1 - t0)
-                        hits += n
-                        pages += bs
-                return 0, 0, pages, hits, calls, hist
-
+        worker = _make_worker(store, args, keys)
         ops, by, pages, hits, calls, hist, elapsed = _drive(
             conc, worker, args.warmup, args.duration
         )
+        points.append((conc, ops, by, pages, hits, calls, hist, elapsed))
+    return points
+
+
+def _hist_to_wire(h: Histogram):
+    return (dict(h.counts), h.n, h._sum_ns, h._max_ns, h._min_ns)
+
+
+def _hist_from_wire(w) -> Histogram:
+    h = Histogram()
+    counts, n, sum_ns, max_ns, min_ns = w
+    h.counts = counts
+    h.n = n
+    h._sum_ns = sum_ns
+    h._max_ns = max_ns
+    h._min_ns = min_ns
+    return h
+
+
+def _rows_from_points(args, points: List[SweepPoint]) -> list:
+    bs = args.batch_size
+    pt = _page_total(args.page_size, args.layout)
+    rows = []
+    for (conc, ops, by, pages, hits, calls, hist, elapsed) in points:
         wl = Workload(block_size=args.page_size, batch_size=bs, threads=conc,
                       duration=args.duration,
                       operation="read" if args.op == "get" else "exists")
@@ -273,18 +281,116 @@ def run_drive(args) -> None:
             hist=hist, op=args.op, pages=pages,
             tokens_per_page=args.tokens_per_page,
             hit_rate=hit_rate if args.op == "get" else float("nan"),
-            note=f"dist batch_{args.op} {layout} ws={ws} remote={args.discovery_addr}",
+            note=(f"dist batch_{args.op} {args.layout} ws={args.working_set} "
+                  f"remote={args.discovery_addr}"
+                  + (f" x{args.processes}proc" if args.processes > 1 else "")),
         ))
-
     _peak_note(rows)
+    return rows
+
+
+def _setup_consumer(args, node_id: str, expect_nodes: int):
+    """Bring up a consumer store, join the ring, register a pool, wait for data."""
+    pt = _page_total(args.page_size, args.layout)
+    consumer_slots = max(_csv_ints(args.concurrencies)) * args.batch_size
+    seg_bytes = args.global_segment_size or int(
+        max(args.working_set, consumer_slots) * pt * 1.3)
+    store = _make_store(args, node_id, seg_bytes)
+    print(f"[drive] {node_id} up: rdma={store.runtime.local_rdma_endpoint} "
+          f"discovery={args.discovery_addr} op={args.op}", flush=True)
+    _wait_ring(store, expect_nodes, args.connect_timeout)
+    pool = HostKVPool(args.page_size, consumer_slots, layout=args.layout)
+    store.register_mem_pool_host(pool)
+    keys = [f"{KEY_PREFIX}/{i}" for i in range(args.working_set)]
+    print(f"[drive] {node_id} waiting for the producer's working set ...", flush=True)
+    _wait_published(store, keys, args.connect_timeout)
+    return store, keys
+
+
+def _merge_points(per_proc: List[List[SweepPoint]]) -> List[SweepPoint]:
+    """Sum throughput counters and merge histograms across processes per conc."""
+    merged: List[SweepPoint] = []
+    n_points = len(per_proc[0])
+    for i in range(n_points):
+        conc = per_proc[0][i][0]
+        ops = by = pages = hits = calls = 0
+        hist = Histogram()
+        elapsed = 0.0
+        total_threads = 0
+        for proc in per_proc:
+            c, o, b, pg, h, cl, hi, el = proc[i]
+            ops += o; by += b; pages += pg; hits += h; calls += cl
+            hist.merge(hi)
+            elapsed = max(elapsed, el)
+            total_threads += c
+        merged.append((total_threads, ops, by, pages, hits, calls, hist, elapsed))
+    return merged
+
+
+def _drive_child(args, proc_idx: int, total: int, q) -> None:
+    try:
+        node_id = f"{args.node_id or 'pcbench-consumer'}-{proc_idx}"
+        store, keys = _setup_consumer(args, node_id, 1 + total)
+        points = _sweep(store, args, keys, _csv_ints(args.concurrencies))
+        wire = [(c, o, b, pg, h, cl, _hist_to_wire(hi), el)
+                for (c, o, b, pg, h, cl, hi, el) in points]
+        q.put((proc_idx, wire))
+        store.close()
+    except BaseException as e:  # report the failure rather than hanging the parent
+        q.put((proc_idx, {"error": repr(e)}))
+
+
+def run_drive(args) -> None:
+    procs = max(1, int(getattr(args, "processes", 1)))
+    report = BaselineReport()
+    report.meta = {
+        "mode": "dist", "role": "drive", "op": args.op,
+        "protocol": args.protocol, "device": args.device_name or "-",
+        "layout": args.layout, "page_size": args.page_size,
+        "batch_size": args.batch_size, "tokens_per_page": args.tokens_per_page,
+        "working_set": args.working_set, "processes": procs,
+        "remote": args.discovery_addr,
+    }
+
+    if procs == 1:
+        store, keys = _setup_consumer(args, args.node_id or "pcbench-consumer", 2)
+        print("[drive] producer ready; starting sweep.", flush=True)
+        points = _sweep(store, args, keys, _csv_ints(args.concurrencies))
+        rows = _rows_from_points(args, points)
+        store.close()
+    else:
+        # Escape the GIL: each process is its own consumer node and runs the
+        # full sweep in parallel; results are summed per concurrency point. The
+        # producer must be started with `serve --readers {procs}` so it only
+        # publishes once all readers have joined the ring (stable sharding).
+        print(f"[drive] launching {procs} reader processes "
+              f"(ensure `serve --readers {procs}`) ...", flush=True)
+        ctx = mp.get_context("spawn")
+        q = ctx.Queue()
+        children = [ctx.Process(target=_drive_child, args=(args, i, procs, q))
+                    for i in range(procs)]
+        for c in children:
+            c.start()
+        collected = {}
+        for _ in range(procs):
+            idx, payload = q.get()
+            if isinstance(payload, dict) and "error" in payload:
+                for c in children:
+                    c.terminate()
+                raise SystemExit(f"[drive] reader process {idx} failed: {payload['error']}")
+            collected[idx] = [(c, o, b, pg, h, cl, _hist_from_wire(hw), el)
+                              for (c, o, b, pg, h, cl, hw, el) in payload]
+        for c in children:
+            c.join()
+        per_proc = [collected[i] for i in sorted(collected)]
+        rows = _rows_from_points(args, _merge_points(per_proc))
+
     for r in rows:
         report.add(r)
-
     print(render_console(report, hicache=True))
     ts = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
     suffix = f"-{args.tag}" if args.tag else ""
     _write(report, args.out_dir, f"hicache-dist-{args.op}-{args.protocol}{suffix}-{ts}")
-    store.close()
 
 
 # --------------------------------------------------------------------------- #
@@ -309,6 +415,8 @@ def _common(p: argparse.ArgumentParser) -> None:
                    help="distinct pages the producer publishes (must match on both)")
     p.add_argument("--global-segment-size", type=int, default=0,
                    help="published-pool bytes (0 = auto-size to the working set)")
+    p.add_argument("--max-channels", type=int, default=16,
+                   help="RC QP channels pooled per peer (raise for high concurrency)")
     p.add_argument("--node-id", default="")
     p.add_argument("--connect-timeout", type=float, default=60.0)
 
@@ -317,6 +425,9 @@ def add_subparsers(sub) -> None:
     p_serve = sub.add_parser(
         "serve", help="producer/data node: publish a working set and serve reads")
     _common(p_serve)
+    p_serve.add_argument("--readers", type=int, default=1,
+                         help="publish only after this many reader nodes join "
+                              "(match the drive --processes count)")
     p_serve.set_defaults(_handler=run_serve)
 
     p_drive = sub.add_parser(
@@ -327,6 +438,12 @@ def add_subparsers(sub) -> None:
     p_drive.add_argument("--concurrencies", default="1,2,4,8,16,32,64")
     p_drive.add_argument("--duration", type=float, default=10.0)
     p_drive.add_argument("--warmup", type=float, default=2.0)
+    p_drive.add_argument("--processes", type=int, default=1,
+                         help="reader processes to run in parallel (escapes the "
+                              "GIL; start `serve --readers N` to match)")
+    p_drive.add_argument("--dir-cache-ttl", type=float, default=0.0,
+                         help="cache resident read locations for N seconds to "
+                              "skip the per-batch directory RPC (0 = off)")
     p_drive.add_argument("--out-dir",
                          default=os.path.join(os.getcwd(), "peercache-bench-results"))
     p_drive.add_argument("--tag", default="")
