@@ -4,6 +4,25 @@ All notable changes to PeerCache are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- **Disk persistence tier (L4)**: published pages are written through to disk
+  (`disk_path`, default `/data/peercache/`, capped by `disk_size`, default
+  `100GB`, LRU-bounded). Pool eviction marks the directory entry non-resident
+  instead of deleting it; a later read promotes the page from disk back into the
+  pool — locally, or on the owner via a `data_promote` RPC for remote readers.
+  `exists` hits also kick a best-effort async prefetch. Degrades gracefully if
+  the directory cannot be created.
+- **Metrics + monitoring**: a Prometheus `/metrics` endpoint and an embedded,
+  dependency-free HTML dashboard (default port `31997`) exposing hit rate,
+  read/write throughput and byte counters, eviction/promote counters, pool/disk
+  usage, member count, and read/write latency p50/p90/p99 + average.
+
+### Changed
+- `DataLocation` gains a `resident` flag (disk-resident pages are kept in the
+  directory as non-resident until promoted).
+
 ## [0.1.1] - 2026-05-31
 
 ### Changed

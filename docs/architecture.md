@@ -120,6 +120,62 @@ guarantees the `addr + rkey` stays valid until the pool itself evicts the entry
 (which also deletes the directory record). This is the standard trade-off for
 correctness; the network transfer itself remains zero-copy.
 
+## Disk persistence tier (L4)
+
+The memory pool is bounded; once full, the LRU page would normally be lost. The
+optional **disk tier** keeps evicted pages on local disk so they can be promoted
+back later (locally or by a remote reader), greatly extending effective capacity.
+
+- **Write-through (async)**: on `set`, after the page lands in the pool it is also
+  enqueued for an async write to disk (`disk_path`, default `/data/peercache/`,
+  capped at `disk_size`, default `100GB`, itself LRU-bounded).
+- **Eviction → non-resident, not deleted**: when the pool evicts a page, its
+  directory entry is *kept but marked `resident=false`* (the page is on disk). The
+  entry is only deleted when the page is finally evicted from disk too.
+- **Promote on read**: a `get` that resolves a non-resident entry triggers a
+  *promote* — the owning node loads the page from disk back into the pool (one
+  disk read + one memcpy), re-marks the directory entry resident, and serves it.
+  - **Local** read: the node promotes its own page (prefetch back into the pool).
+  - **Remote** read: the reader sends a `data_promote` RPC to the owner; the owner
+    promotes from its disk into its pool and returns the fresh `{addr, rkey}`, then
+    the reader issues the zero-copy RDMA READ as usual.
+- **`exists` warming**: because non-resident entries stay in the directory,
+  `exists` already reports a hit for disk-resident pages. On a hit it also kicks a
+  best-effort async promote so the imminent `get` is warm.
+
+```mermaid
+flowchart LR
+    SET[set page] --> POOL[(pool MR)]
+    SET -. async write-through .-> DISK[(disk tier)]
+    POOL -- LRU evict --> DISK
+    POOL -- evict --> DIR{{directory: resident=false}}
+    GET[get page] --> DIR2{{directory}}
+    DIR2 -- resident=false --> PROMOTE[promote: disk -> pool]
+    PROMOTE --> POOL
+    PROMOTE --> RDMA[zero-copy RDMA READ]
+```
+
+Copy-count impact: write-through adds one extra host copy on `set` (page → disk,
+on a background thread). A promote adds one disk read + one memcpy on the owner;
+the cross-node transfer itself stays zero-copy. The disk tier is optional
+(`disk_enabled`) and degrades gracefully (if `disk_path` cannot be created it is
+disabled and the pool falls back to delete-on-evict).
+
+## Monitoring (metrics + dashboard)
+
+Each node optionally runs a metrics server (default on, port `31997`):
+
+- `GET /metrics` — Prometheus text exposition for Prometheus/Grafana scraping.
+- `GET /` — a built-in, dependency-free HTML dashboard (auto-refreshing) for quick
+  inspection without a Prometheus stack.
+
+Exposed signals include: pool bytes used / capacity / key count, disk bytes used /
+key count, read hit rate, read/write request and byte counters (for windowed
+rates via `rate()`), eviction/promote counters, and operation latency summaries
+(p50/p90/p99 and average for read and write). Disable with `metrics_enabled`,
+move it with `metrics_port`, or turn off just the HTML page with
+`metrics_dashboard`.
+
 ## Consistent-hash directory
 
 - Each node hosts one **shard** of the directory: a local `key -> DataLocation`
