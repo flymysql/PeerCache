@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, asdict
-from typing import Optional
+from typing import List, Optional
 
 
 @dataclass
@@ -47,14 +47,28 @@ class DataLocation:
     """
 
     node_id: str
-    rdma_endpoint: str  # "host:port" of the data node's transfer engine
+    rdma_endpoint: str  # rail-0 "host:port" of the data node's transfer engine
     remote_addr: int  # virtual address inside that node's published-pool MR
-    rkey: int  # remote key for that MR
+    rkey: int  # rail-0 remote key for that MR
     length: int  # bytes
     # When False the page has been evicted from the pool and only lives on the
     # owner's disk tier; remote_addr/rkey are invalid until the owner promotes
     # it back into the pool (see PeerCacheStore._ensure_resident).
     resident: bool = True
+    # Multi-rail (multi-NIC) reachability: the same pool MR registered on every
+    # rail of the owner. rail_endpoints[r] is the rail-r QP-bootstrap endpoint
+    # and rail_rkeys[r] the rail-r remote key for the SAME remote_addr. A reader
+    # with matching rails can stripe one-sided READs across all of them to use
+    # several NICs from a single process. Empty/length-1 == single-rail (the
+    # legacy rdma_endpoint/rkey). Defaults keep old producers wire-compatible.
+    rail_endpoints: List[str] = field(default_factory=list)
+    rail_rkeys: List[int] = field(default_factory=list)
+
+    def endpoints(self) -> List[str]:
+        return self.rail_endpoints or [self.rdma_endpoint]
+
+    def rkeys(self) -> List[int]:
+        return self.rail_rkeys or [self.rkey]
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -68,4 +82,6 @@ class DataLocation:
             rkey=int(d["rkey"]),
             length=int(d["length"]),
             resident=bool(d.get("resident", True)),
+            rail_endpoints=list(d.get("rail_endpoints", []) or []),
+            rail_rkeys=[int(x) for x in (d.get("rail_rkeys", []) or [])],
         )

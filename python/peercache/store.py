@@ -137,6 +137,9 @@ class PeerCacheStore(HiCacheStorage):
         self._pool: Optional[PublishedPool] = None
         self._pool_keepalive = None
         self._recv_mr = None
+        # Per-rail (multi-NIC) bootstrap endpoints this node advertises for its
+        # published pool; reads stripe across them. Defaults to the single rail.
+        self._rail_endpoints: List[str] = []
         # _key_len is touched by concurrent batch_set / batch_get / eviction
         # callbacks, so all access is guarded to stay safe under threaded SGLang.
         self._key_len: Dict[str, int] = {}
@@ -212,7 +215,10 @@ class PeerCacheStore(HiCacheStorage):
             capacity=capacity,
             rkey=pool_mr.rkey,
             on_evict=self._on_pool_evict,
+            rkeys=pool_mr.rkeys,
         )
+        # Endpoints peers use to READ this pool, one per rail (NIC).
+        self._rail_endpoints = list(self.runtime.transport.local_endpoints())
         logger.info(
             "PeerCacheStore registered MRs: recv=%d bytes, pool=%d bytes",
             kv_bytes,
@@ -227,6 +233,20 @@ class PeerCacheStore(HiCacheStorage):
             self.runtime.transport.register_mr(
                 buf.data_ptr(), buf.numel() * buf.element_size()
             )
+
+    def _resident_location(self, remote_addr: int, length: int) -> DataLocation:
+        """Build a resident DataLocation carrying all rail endpoints/rkeys so a
+        multi-rail reader can stripe the READ across every NIC."""
+        return DataLocation(
+            node_id=self.config.node_id,
+            rdma_endpoint=self.runtime.local_rdma_endpoint,
+            remote_addr=remote_addr,
+            rkey=self._pool.rkey,
+            length=length,
+            resident=True,
+            rail_endpoints=list(self._rail_endpoints),
+            rail_rkeys=list(self._pool.rkeys),
+        )
 
     def _on_pool_evict(self, evicted_keys: List[str]) -> None:
         # A page left the in-memory pool. With a disk tier the page is still on
@@ -287,7 +307,6 @@ class PeerCacheStore(HiCacheStorage):
         """For each key, return a resident DataLocation (in this node's pool) or
         None. Promotes from disk into the pool when necessary."""
         out: List[Optional[DataLocation]] = []
-        endpoint = self.runtime.local_rdma_endpoint
         promoted: Dict[str, DataLocation] = {}
         for k in keys:
             if self._pool is None:
@@ -296,8 +315,7 @@ class PeerCacheStore(HiCacheStorage):
             al = self._pool.address_of(k)
             if al is not None:
                 addr, length = al
-                out.append(DataLocation(self.config.node_id, endpoint, addr,
-                                        self._pool.rkey, length, resident=True))
+                out.append(self._resident_location(addr, length))
                 continue
             data = self._disk.get(k) if self._disk is not None else None
             if data is None:
@@ -308,8 +326,7 @@ class PeerCacheStore(HiCacheStorage):
             if addr is None:
                 out.append(None)
                 continue
-            loc = DataLocation(self.config.node_id, endpoint, addr,
-                               self._pool.rkey, len(data), resident=True)
+            loc = self._resident_location(addr, len(data))
             promoted[k] = loc
             with self._key_len_lock:
                 self._key_len[k] = len(data)
@@ -417,13 +434,7 @@ class PeerCacheStore(HiCacheStorage):
                     logger.debug("peercache: disk write-through failed: %s", e)
             with self._key_len_lock:
                 self._key_len[key] = sizes[i]
-            entries[key] = DataLocation(
-                node_id=self.config.node_id,
-                rdma_endpoint=endpoint,
-                remote_addr=remote_addr,
-                rkey=self._pool.rkey,
-                length=sizes[i],
-            )
+            entries[key] = self._resident_location(remote_addr, sizes[i])
             results[i] = True
             published_bytes += sizes[i]
         # Reconcile: a page published earlier in THIS batch may have been evicted
@@ -496,13 +507,16 @@ class PeerCacheStore(HiCacheStorage):
         promoted = self._resolve_non_resident(comp_keys, locations)
 
         # Build parallel arrays for the remote reads (no per-op Python object on
-        # the GIL-held hot path); local hits are served by memmove inline.
+        # the GIL-held hot path); local hits are served by memmove inline. The
+        # per-node rail maps let the transport stripe each batch across all of
+        # the owner's NICs (rails) inside one GIL-released call.
         r_nodes: List[str] = []
         r_local: List[int] = []
         r_remote: List[int] = []
-        r_rkey: List[int] = []
         r_len: List[int] = []
         op_index: List[int] = []
+        rail_eps: Dict[str, List[str]] = {}
+        rail_rks: Dict[str, List[int]] = {}
         for i, loc in enumerate(locations):
             if loc is None or not loc.resident:
                 continue
@@ -513,15 +527,18 @@ class PeerCacheStore(HiCacheStorage):
                 results[i] = True
                 sources[i] = "disk" if i in promoted else "local"
                 continue
-            r_nodes.append(loc.rdma_endpoint)
+            nk = loc.rdma_endpoint  # rail-0 endpoint identifies the owner
+            if nk not in rail_eps:
+                rail_eps[nk] = loc.endpoints()
+                rail_rks[nk] = loc.rkeys()
+            r_nodes.append(nk)
             r_local.append(ptrs[i])
             r_remote.append(loc.remote_addr)
-            r_rkey.append(loc.rkey)
             r_len.append(loc.length)
             op_index.append(i)
         if op_index:
-            oks = self.runtime.transport.batch_read_v(
-                r_nodes, r_local, r_remote, r_rkey, r_len)
+            oks = self.runtime.transport.batch_read_multi(
+                r_nodes, r_local, r_remote, r_len, rail_eps, rail_rks)
             for j, ok in enumerate(oks):
                 idx = op_index[j]
                 results[idx] = bool(ok)
