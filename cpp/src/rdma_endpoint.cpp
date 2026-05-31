@@ -12,6 +12,7 @@ constexpr int kMaxSendWr = 1024;
 constexpr int kMaxRecvWr = 16;
 constexpr int kMaxSge = 1;
 constexpr int kCqDepth = kMaxSendWr + kMaxRecvWr;
+constexpr int kPollBatch = 16;  // CQEs reaped per ibv_poll_cq call
 }  // namespace
 
 RdmaEndpoint::RdmaEndpoint(RdmaContext* ctx) : ctx_(ctx) {}
@@ -69,7 +70,12 @@ bool RdmaEndpoint::connect(const QpInfo& remote) {
   ibv_qp_attr attr;
   std::memset(&attr, 0, sizeof(attr));
   attr.qp_state = IBV_QPS_RTR;
-  attr.path_mtu = IBV_MTU_1024;
+  // Use the port's negotiated active MTU (e.g. 4096 on RoCE) rather than a
+  // hardcoded 1 KiB; large KV pages move far fewer packets at MTU 4096. Both
+  // RC peers query their own port, which match on a symmetric fabric. Guard
+  // against a driver reporting 0.
+  attr.path_mtu = ctx_->port_attr().active_mtu ? ctx_->port_attr().active_mtu
+                                               : IBV_MTU_1024;
   attr.dest_qp_num = remote.qp_num;
   attr.rq_psn = remote.psn;
   attr.max_dest_rd_atomic = 16;
@@ -139,13 +145,15 @@ bool RdmaEndpoint::post_read(uint64_t local_addr, uint32_t lkey,
 
 bool RdmaEndpoint::drain(size_t count, std::vector<bool>& ok, double timeout_s) {
   size_t seen = 0;
-  ibv_wc wc;
+  ibv_wc wc[kPollBatch];
   const auto deadline =
       std::chrono::steady_clock::now() +
       std::chrono::duration_cast<std::chrono::steady_clock::duration>(
           std::chrono::duration<double>(timeout_s));
   while (seen < count) {
-    int n = ibv_poll_cq(cq_, 1, &wc);
+    // Reap several completions per call to cut per-CQE polling overhead under
+    // high concurrency (one syscall-free batch instead of one call per CQE).
+    int n = ibv_poll_cq(cq_, kPollBatch, wc);
     if (n < 0) return false;
     if (n == 0) {
       // No completion yet: bail out if we have waited past the deadline so a
@@ -154,9 +162,11 @@ bool RdmaEndpoint::drain(size_t count, std::vector<bool>& ok, double timeout_s) 
       if (std::chrono::steady_clock::now() >= deadline) return false;
       continue;
     }
-    ++seen;
-    if (wc.status == IBV_WC_SUCCESS && wc.wr_id < ok.size()) {
-      ok[static_cast<size_t>(wc.wr_id)] = true;
+    for (int i = 0; i < n; ++i) {
+      ++seen;
+      if (wc[i].status == IBV_WC_SUCCESS && wc[i].wr_id < ok.size()) {
+        ok[static_cast<size_t>(wc[i].wr_id)] = true;
+      }
     }
   }
   return true;
