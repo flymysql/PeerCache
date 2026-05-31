@@ -235,26 +235,34 @@ def bench_transfer_engine(
             _kill(meta_proc)
 
 
-def main() -> None:
-    ap = argparse.ArgumentParser(description="Mooncake transfer-engine benchmark")
-    ap.add_argument("--protocol", default="tcp", choices=["tcp", "rdma"])
-    ap.add_argument("--device-name", default="")
-    ap.add_argument("--block-size", type=int, default=65536)
-    ap.add_argument("--batch-size", type=int, default=64)
-    ap.add_argument("--threads", type=int, default=4)
-    ap.add_argument("--duration", type=float, default=5.0)
-    ap.add_argument("--metadata-url", default=None)
-    args = ap.parse_args()
+def _add_args(p) -> None:
+    p.add_argument("--protocol", default="rdma", choices=["tcp", "rdma"])
+    p.add_argument("--device-name", default="")
+    p.add_argument("--block-size", type=int, default=65536)
+    p.add_argument("--batch-size", type=int, default=64)
+    p.add_argument("--threads", type=int, default=4)
+    p.add_argument("--duration", type=float, default=5.0)
+    p.add_argument("--metadata-url", default=None)
 
-    wl = Workload(
-        block_size=args.block_size,
-        batch_size=args.batch_size,
-        threads=args.threads,
-        duration=args.duration,
-    )
+
+def run(args) -> None:
+    wl = Workload(block_size=args.block_size, batch_size=args.batch_size,
+                  threads=args.threads, duration=args.duration)
     report = BaselineReport()
     report.add(bench_transfer_engine(wl, args.protocol, args.device_name, args.metadata_url))
     print(render_console(report))
+
+
+def add_subparser(sub) -> None:
+    p = sub.add_parser("mooncake", help="Mooncake transfer_engine_bench wrapper")
+    _add_args(p)
+    p.set_defaults(_handler=run)
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description="Mooncake transfer-engine benchmark")
+    _add_args(ap)
+    run(ap.parse_args())
 
 
 if __name__ == "__main__":

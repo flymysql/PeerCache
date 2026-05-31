@@ -407,68 +407,68 @@ def _csv_ints(s: str) -> List[int]:
     return [int(x) for x in s.split(",") if x.strip()]
 
 
-def main() -> None:
-    ap = argparse.ArgumentParser(description="PeerCache HiCache benchmark")
-    sub = ap.add_subparsers(dest="mode", required=True)
-
+def add_subparsers(sub) -> None:
+    """Attach the HiCache subcommands (latency/throughput/saturation/suite)."""
     p_lat = sub.add_parser("latency", help="single in-flight op latency baseline")
     _common_args(p_lat)
+    p_lat.set_defaults(_handler=run)
 
     p_thr = sub.add_parser("throughput", help="fixed concurrency throughput")
     _common_args(p_thr)
     p_thr.add_argument("--concurrency", type=int, default=8)
     p_thr.add_argument("--op", default="get", choices=["get", "set", "exists"])
+    p_thr.set_defaults(_handler=run)
 
     p_sat = sub.add_parser("saturation", help="concurrency sweep -> peak throughput")
     _common_args(p_sat)
     p_sat.add_argument("--concurrencies", default="1,2,4,8,16,32")
     p_sat.add_argument("--op", default="get", choices=["get", "set", "exists"])
+    p_sat.set_defaults(_handler=run)
 
     p_suite = sub.add_parser("suite", help="full systematic baseline")
     _common_args(p_suite)
     p_suite.add_argument("--concurrencies", default="1,2,4,8,16,32")
+    p_suite.set_defaults(_handler=run)
 
-    args = ap.parse_args()
+
+def run(args) -> None:
+    mode = args.command
     report = BaselineReport()
     report.meta = {
-        "mode": args.mode, "protocol": args.protocol,
+        "mode": mode, "protocol": args.protocol,
         "device": args.device_name or "-", "layout": args.layout,
         "page_size": args.page_size, "batch_size": args.batch_size,
         "tokens_per_page": args.tokens_per_page,
     }
     op_fn = {"get": run_get, "set": run_set, "exists": run_exists}
 
-    if args.mode == "latency":
+    if mode == "latency":
         args.batch_size = 1
         for fn in (run_get, run_set, run_exists):
             for r in fn(args, [1]):
                 report.add(r)
-    elif args.mode == "throughput":
+    elif mode == "throughput":
         for r in op_fn[args.op](args, [args.concurrency]):
             report.add(r)
-    elif args.mode == "saturation":
+    elif mode == "saturation":
         rows = op_fn[args.op](args, _csv_ints(args.concurrencies))
         _peak_note(rows)
         for r in rows:
             report.add(r)
-    elif args.mode == "suite":
+    elif mode == "suite":
         concs = _csv_ints(args.concurrencies)
-        # 1) single-op latency baseline (batch 1, conc 1)
         lat_args = argparse.Namespace(**vars(args))
         lat_args.batch_size = 1
         for fn in (run_get, run_set, run_exists):
             for r in fn(lat_args, [1]):
                 r.note = (r.note + " [latency-baseline]").strip()
                 report.add(r)
-        # 2) get saturation
         g = run_get(args, concs); _peak_note(g)
         for r in g:
             report.add(r)
-        # 3) set saturation
         s = run_set(args, concs); _peak_note(s)
         for r in s:
             report.add(r)
-        # 4) exists saturation
         e = run_exists(args, concs); _peak_note(e)
         for r in e:
             report.add(r)
@@ -476,7 +476,15 @@ def main() -> None:
     print(render_console(report, hicache=True))
     ts = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
     suffix = f"-{args.tag}" if args.tag else ""
-    _write(report, args.out_dir, f"hicache-{args.mode}-{args.protocol}{suffix}-{ts}")
+    _write(report, args.out_dir, f"hicache-{mode}-{args.protocol}{suffix}-{ts}")
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description="PeerCache HiCache benchmark")
+    sub = ap.add_subparsers(dest="command", required=True)
+    add_subparsers(sub)
+    args = ap.parse_args()
+    args._handler(args)
 
 
 if __name__ == "__main__":

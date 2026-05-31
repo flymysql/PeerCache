@@ -183,18 +183,18 @@ def bench_store_get(wl: Workload, protocol: str, device_name: str = ""):
                        note="batch_get_v1: directory GET + remote READ")
 
 
-def main() -> None:
-    ap = argparse.ArgumentParser(description="PeerCache data-plane microbench")
-    ap.add_argument("--protocol", default="rdma", choices=["tcp", "rdma"])
-    ap.add_argument("--device-name", default="", help="RDMA device (e.g. mlx5_0)")
-    ap.add_argument("--block-size", type=int, default=65536)
-    ap.add_argument("--batch-size", type=int, default=64)
-    ap.add_argument("--threads", type=int, default=1)
-    ap.add_argument("--duration", type=float, default=5.0)
-    ap.add_argument("--warmup", type=float, default=1.0)
-    ap.add_argument("--path", default="transport", choices=["transport", "store", "both"])
-    args = ap.parse_args()
+def _add_args(p) -> None:
+    p.add_argument("--protocol", default="rdma", choices=["tcp", "rdma"])
+    p.add_argument("--device-name", default="", help="RDMA device (e.g. mlx5_0)")
+    p.add_argument("--block-size", type=int, default=65536)
+    p.add_argument("--batch-size", type=int, default=64)
+    p.add_argument("--threads", type=int, default=1)
+    p.add_argument("--duration", type=float, default=5.0)
+    p.add_argument("--warmup", type=float, default=1.0)
+    p.add_argument("--path", default="transport", choices=["transport", "store", "both"])
 
+
+def run(args) -> None:
     wl = Workload(block_size=args.block_size, batch_size=args.batch_size,
                   threads=args.threads, duration=args.duration, warmup=args.warmup)
     report = BaselineReport()
@@ -204,6 +204,18 @@ def main() -> None:
     if args.path in ("store", "both"):
         report.add(bench_store_get(wl, args.protocol, args.device_name))
     print(render_console(report, hicache=True))
+
+
+def add_subparser(sub) -> None:
+    p = sub.add_parser("micro", help="low-level data-plane microbench (transport/store)")
+    _add_args(p)
+    p.set_defaults(_handler=run)
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description="PeerCache data-plane microbench")
+    _add_args(ap)
+    run(ap.parse_args())
 
 
 if __name__ == "__main__":

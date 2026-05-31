@@ -51,24 +51,24 @@ def parse_sizes(s: str):
     return out
 
 
-def main() -> None:
-    ap = argparse.ArgumentParser(description="PeerCache vs Mooncake baseline")
-    ap.add_argument("--protocol", default="rdma", choices=["rdma", "tcp"])
-    ap.add_argument("--device-name", default="", help="RDMA device for both systems, e.g. mlx5_0")
-    ap.add_argument("--block-sizes", default="4096,65536,1048576",
-                    help="comma list, e.g. 4k,64k,1m")
-    ap.add_argument("--batch-size", type=int, default=64)
-    ap.add_argument("--threads", type=int, default=1, help="PeerCache submit threads")
-    ap.add_argument("--mooncake-threads", type=int, default=4,
-                    help="Mooncake submit threads (its bench is multi-threaded by design)")
-    ap.add_argument("--duration", type=float, default=5.0)
-    ap.add_argument("--warmup", type=float, default=1.0)
-    ap.add_argument("--skip-mooncake", action="store_true")
-    ap.add_argument("--skip-store", action="store_true")
-    ap.add_argument("--out-dir", default=os.path.join(os.getcwd(), "peercache-bench-results"))
-    ap.add_argument("--tag", default="", help="optional label suffix for output files")
-    args = ap.parse_args()
+def _add_args(p) -> None:
+    p.add_argument("--protocol", default="rdma", choices=["rdma", "tcp"])
+    p.add_argument("--device-name", default="", help="RDMA device for both systems, e.g. mlx5_0")
+    p.add_argument("--block-sizes", default="4096,65536,1048576",
+                   help="comma list, e.g. 4k,64k,1m")
+    p.add_argument("--batch-size", type=int, default=64)
+    p.add_argument("--threads", type=int, default=1, help="PeerCache submit threads")
+    p.add_argument("--mooncake-threads", type=int, default=4,
+                   help="Mooncake submit threads (its bench is multi-threaded by design)")
+    p.add_argument("--duration", type=float, default=5.0)
+    p.add_argument("--warmup", type=float, default=1.0)
+    p.add_argument("--skip-mooncake", action="store_true")
+    p.add_argument("--skip-store", action="store_true")
+    p.add_argument("--out-dir", default=os.path.join(os.getcwd(), "peercache-bench-results"))
+    p.add_argument("--tag", default="", help="optional label suffix for output files")
 
+
+def run(args) -> None:
     report = BaselineReport()
 
     # Start one shared Mooncake metadata server for the whole sweep (avoids
@@ -122,7 +122,7 @@ def main() -> None:
     os.makedirs(args.out_dir, exist_ok=True)
     ts = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
     suffix = f"-{args.tag}" if args.tag else ""
-    base = f"baseline-{args.protocol}{suffix}-{ts}"
+    base = f"compare-{args.protocol}{suffix}-{ts}"
     json_path = os.path.join(args.out_dir, base + ".json")
     md_path = os.path.join(args.out_dir, base + ".md")
     with open(json_path, "w") as f:
@@ -137,6 +137,18 @@ def main() -> None:
         f.write(render_console(report).split("\n\n", 1)[-1])
         f.write("\n")
     print(f"\nwrote {json_path}\nwrote {md_path}")
+
+
+def add_subparser(sub) -> None:
+    p = sub.add_parser("compare", help="PeerCache vs Mooncake sweep (matched block sizes)")
+    _add_args(p)
+    p.set_defaults(_handler=run)
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description="PeerCache vs Mooncake baseline")
+    _add_args(ap)
+    run(ap.parse_args())
 
 
 if __name__ == "__main__":
