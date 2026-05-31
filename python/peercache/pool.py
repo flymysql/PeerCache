@@ -28,10 +28,13 @@ class PublishedPool:
         capacity: int,
         rkey: int,
         on_evict: Optional[Callable[[List[str]], None]] = None,
+        rkeys: Optional[List[int]] = None,
     ):
         self._base = base_addr
         self._capacity = capacity
         self._rkey = rkey
+        # Per-rail remote keys for the same MR (multi-NIC). Defaults to [rkey].
+        self._rkeys = list(rkeys) if rkeys else [rkey]
         self._on_evict = on_evict
 
         self._next_offset = 0
@@ -43,6 +46,10 @@ class PublishedPool:
     @property
     def rkey(self) -> int:
         return self._rkey
+
+    @property
+    def rkeys(self) -> List[int]:
+        return self._rkeys
 
     @property
     def base_addr(self) -> int:

@@ -73,6 +73,7 @@ def _make_store(args, node_id: str, seg_bytes: int):
         "discovery_addr": args.discovery_addr,
         "protocol": args.protocol,
         "device_name": args.device_name,
+        "device_names": getattr(args, "devices", "") or "",
         "node_id": node_id,
         "heartbeat_interval": 0.5,
         "member_ttl": 30.0,
@@ -406,6 +407,12 @@ def _common(p: argparse.ArgumentParser) -> None:
                         "the NIC that routes to --discovery-addr)")
     p.add_argument("--protocol", default="rdma", choices=["rdma", "tcp"])
     p.add_argument("--device-name", default="", help="RDMA device, e.g. mlx5_bond_1")
+    p.add_argument("--devices", default="",
+                   help="multi-rail: comma-separated device list, e.g. "
+                        "mlx5_bond_1,...,mlx5_bond_8. One process opens a rail "
+                        "per device and stripes READs across all of them. Must "
+                        "match in count/order on serve and drive. Overrides "
+                        "--device-name.")
     p.add_argument("--ib-port", type=int, default=1)
     p.add_argument("--gid-index", type=int, default=3)
     p.add_argument("--layout", default="mla", choices=["mla", "mha"])
