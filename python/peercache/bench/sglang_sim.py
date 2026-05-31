@@ -26,6 +26,22 @@ from types import SimpleNamespace
 from typing import List, Optional
 
 
+# Cache of per-stride fill templates so slot initialisation is a single C-level
+# memmove instead of a multi-hundred-million-iteration pure-Python byte loop.
+# T[k] = k % 251, so for a slot value v the byte at position j is
+# T[(v % 251) + j] = (v + j) % 251 -- identical to the original ramp pattern.
+_FILL_TEMPLATES: dict = {}
+
+
+def _fill_template_buf(stride: int):
+    buf = _FILL_TEMPLATES.get(stride)
+    if buf is None:
+        raw = bytes(k % 251 for k in range(stride + 251))
+        buf = (ctypes.c_char * len(raw)).from_buffer_copy(raw)
+        _FILL_TEMPLATES[stride] = buf
+    return buf
+
+
 def alloc_host_buffer(size: int):
     """(keepalive, base_addr). Prefer torch pinned memory for real RDMA; the
     ctypes fallback still registers fine, just not page-locked."""
@@ -96,11 +112,14 @@ class HostKVPool:
         return ptrs, sizes
 
     def fill_slot(self, idx: int, byte_val: int) -> None:
-        seg = (ctypes.c_byte * self.slot_stride).from_address(
-            self._base + idx * self.slot_stride
-        )
-        for j in range(self.slot_stride):
-            seg[j] = (byte_val + j) % 251
+        # Fill the slot with the deterministic ramp ((byte_val + j) % 251) via a
+        # single memmove from a precomputed template. A per-byte Python loop here
+        # is O(page_bytes) per slot and, with 128 KiB pages over thousands of
+        # slots, stalls the benchmark for minutes (appearing to hang).
+        stride = self.slot_stride
+        template = _fill_template_buf(stride)
+        off = byte_val % 251
+        ctypes.memmove(self._base + idx * stride, ctypes.byref(template, off), stride)
 
     def page_bytes_total(self) -> int:
         """Total bytes transferred for one logical page (all components)."""
