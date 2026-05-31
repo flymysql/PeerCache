@@ -115,6 +115,7 @@ RDMA / 传输：
 | `device_name` | `""` | RDMA 设备，如 `mlx5_0`；为空则取第一个激活设备 |
 | `ib_port` | `1` | HCA 端口 |
 | `gid_index` | `3` | GID 索引（RoCE v2 通常为 3） |
+| `max_channels_per_peer` | `16` | 每个对端的最大并发数据面通道数（RDMA 为 QP+CQ；TCP 回退为 socket）。限制对单个对端的并行读取数；超出的线程会短暂等待空闲通道 |
 
 容量 / 放置：
 

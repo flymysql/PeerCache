@@ -40,6 +40,11 @@ class PeerCacheConfig:
     ib_port: int = 1
     gid_index: int = 3
 
+    # Max concurrent data-plane channels (QP+CQ for RDMA, sockets for TCP) kept
+    # per peer. Bounds how many reader threads can read from one peer in
+    # parallel; extra threads briefly wait for a channel to free up.
+    max_channels_per_peer: int = 16
+
     # Backend-owned published pool size (host memory registered as MR).
     global_segment_size: int = 4 << 30
 
@@ -84,6 +89,7 @@ class PeerCacheConfig:
             self.node_id = f"{self.local_hostname}-{uuid.uuid4().hex[:8]}"
         self.global_segment_size = _parse_size(self.global_segment_size)
         self.disk_size = _parse_size(self.disk_size)
+        self.max_channels_per_peer = max(1, int(self.max_channels_per_peer))
         self.disk_enabled = _as_bool(self.disk_enabled)
         self.metrics_enabled = _as_bool(self.metrics_enabled)
         self.metrics_dashboard = _as_bool(self.metrics_dashboard)
@@ -102,6 +108,7 @@ class PeerCacheConfig:
             "device_name",
             "ib_port",
             "gid_index",
+            "max_channels_per_peer",
             "global_segment_size",
             "vnodes",
             "directory_replicas",
