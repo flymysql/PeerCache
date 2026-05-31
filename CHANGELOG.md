@@ -6,6 +6,55 @@ All notable changes to PeerCache are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-05-31
+
+### Added
+- **Two-host (distributed) benchmark** (`peercache-bench serve` / `drive`): runs
+  the producer (data node) and consumer (driver) as separate processes on two
+  machines so the GET path exercises a genuine cross-host one-sided RDMA READ,
+  instead of the in-process `127.0.0.1` loopback used by `suite`/`micro`. The
+  producer publishes only after its readers join the ring (stable directory
+  sharding); the consumer runs the get/exists concurrency sweep. `--local-host`
+  auto-detects the NIC that routes to `--discovery-addr`. `drive --processes N`
+  (paired with `serve --readers N`) runs N reader processes to escape the GIL
+  for full-load benchmarking.
+- **Benchmark logging**: global `--log-level` (default `warning`) and
+  `--log-file` on `peercache-bench`, so the `PeerCacheStore up: ... rdma=…`
+  transport-selection line and the `using TCP fallback` warning are visible.
+- **`directory_read_cache_ttl`** (default `0`/off): caches resolved *resident*
+  read locations for N seconds to skip the per-batch directory lookup on hot,
+  static working sets; invalidated on a read miss and TTL-bounded. Exposed as
+  `drive --dir-cache-ttl`.
+- **`max_channels_per_peer`** is now a real `PeerCacheConfig` field (was a
+  hardcoded 16); exposed as `drive --max-channels`.
+- **`PEERCACHE_RDMA_OP_TIMEOUT_MS`** to tune the data-plane completion timeout.
+
+### Changed
+- **Vectorised read hot path**: `store._fetch` now builds parallel primitive
+  arrays and calls a new GIL-released `TransferEngine::batch_read_v` (and
+  `Transport.batch_read_v`) instead of constructing one Python/pybind object per
+  op, shrinking the GIL-held portion of `batch_get_v1` so concurrent readers
+  keep more RDMA in flight and can saturate the NIC. `batch_read` is preserved
+  (adapts to the vectorised path).
+- **RDMA tuning**: RC QPs now use the port's negotiated **active MTU** (e.g.
+  4096 on RoCE) instead of a hardcoded 1 KiB, and `drain()` reaps completions in
+  batches of 16 to cut per-CQE polling overhead.
+
+### Fixed
+- **Benchmark stall on large pages**: `HostKVPool.fill_slot` initialised each
+  page with a per-byte Python loop (hundreds of millions of assignments for
+  128 KiB pages across thousands of slots), stalling the suite for minutes and
+  appearing to hang. Replaced with a single `memmove` from a precomputed
+  template (identical bytes); 2048 × 128 KiB slots now fill in ~26 ms.
+- **Indefinite hang on a stalled RDMA read**: `RdmaEndpoint::drain` busy-polled
+  the completion queue with no deadline, so a READ that never completes (e.g. a
+  RoCE GID/loopback misconfiguration) wedged the worker — and the whole process
+  — forever. `drain()` now has a timeout (default 5s) and `batch_read` discards
+  a timed-out channel; the TCP QP-bootstrap sockets gain send/recv timeouts.
+  A broken fabric now fails fast and visibly instead of looking like a deadlock.
+- Warn once when host buffers cannot be page-locked (no torch / pin failed),
+  since pageable memory materially lowers RDMA throughput.
+
 ## [0.3.0] - 2026-05-31
 
 ### Added
@@ -94,6 +143,8 @@ Initial release.
   lightweight TCP RPC.
 - MkDocs SDK documentation site and GitHub Actions for CI, docs, and release.
 
+[0.4.0]: https://github.com/flymysql/PeerCache/releases/tag/v0.4.0
+[0.3.0]: https://github.com/flymysql/PeerCache/releases/tag/v0.3.0
 [0.2.0]: https://github.com/flymysql/PeerCache/releases/tag/v0.2.0
 [0.1.1]: https://github.com/flymysql/PeerCache/releases/tag/v0.1.1
 [0.1.0]: https://github.com/flymysql/PeerCache/releases/tag/v0.1.0
