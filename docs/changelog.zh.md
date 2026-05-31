@@ -2,7 +2,7 @@
 
 本项目遵循 [语义化版本](https://semver.org/)。
 
-## [未发布]
+## [0.2.0] - 2026-05-31
 
 ### 新增
 - **磁盘持久化分层（L4）**：发布的页面会落盘（`disk_path`，默认 `/data/peercache/`，
@@ -43,5 +43,6 @@
 - 用于无 RDMA 硬件功能性测试的 TCP 回退传输。
 - MkDocs SDK 文档站点，以及用于 CI、文档、发布的 GitHub Actions。
 
+[0.2.0]: https://github.com/flymysql/PeerCache/releases/tag/v0.2.0
 [0.1.1]: https://github.com/flymysql/PeerCache/releases/tag/v0.1.1
 [0.1.0]: https://github.com/flymysql/PeerCache/releases/tag/v0.1.0
