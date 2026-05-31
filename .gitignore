@@ -15,7 +15,6 @@ site/
 .cache/
 _skbuild/
 
-# Benchmark run artifacts. Results are RDMA-hardware specific; commit a chosen
-# baseline explicitly with `git add -f benchmarks/results/<file>`.
-benchmarks/results/*
-!benchmarks/results/.gitkeep
+# Benchmark run artifacts (written to ./peercache-bench-results/ by the
+# `peercache-bench*` commands). RDMA-hardware specific; do not commit.
+peercache-bench-results/

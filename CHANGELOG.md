@@ -14,7 +14,10 @@ All notable changes to PeerCache are documented here. The format is based on
   tokens/s, GB/s) and latency tail (p50/p95/p99/p999/max) across a thread-model
   sweep, including full-load saturation/peak throughput, with `latency`,
   `throughput`, `saturation`, and `suite` modes. Memory-bounded HDR-style latency
-  histogram. Includes an optional Mooncake `transfer_engine_bench` comparison and
+  histogram. Shipped inside the package and exposed as console commands
+  (`peercache-bench`, `peercache-bench-micro`, `peercache-bench-mooncake`,
+  `peercache-bench-compare`) -- run after `pip install` with no repo clone or
+  PYTHONPATH. Includes an optional Mooncake `transfer_engine_bench` comparison and
   a low-level data-plane microbench. New `Benchmarks` docs page (EN/中文) and a
   `bench` extra. The TCP fallback is for functional smoke testing only.
 
