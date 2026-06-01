@@ -47,6 +47,9 @@ flowchart LR
 | 协调 | master 分配 / 跟踪对象 | 仅服务发现，内嵌于某个节点 |
 | 传输 | RDMA 零拷贝 | RDMA 零拷贝（单边 READ） |
 
+PeerCache 是**去中心化的前缀/KV 复用缓存**——不是 PD 搬运引擎。它的定位、与中心化存储的
+取舍、以及何时该选别的方案,见[定位与对比](positioning.md)。
+
 ## 性能速览
 
 跨机 RDMA 实测（GET，MLA；2× AMD EPYC 9K84 + 8× ConnectX-7，RoCEv2，MTU 4096）：
