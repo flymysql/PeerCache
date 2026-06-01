@@ -299,6 +299,16 @@ class PeerCacheStore(HiCacheStorage):
         m.set_gauge_provider("disk_capacity_bytes", lambda: self.config.disk_size if self._disk else 0)
         m.set_gauge_provider("disk_keys", lambda: self._disk.stats()[1] if self._disk else 0)
         m.set_gauge_provider("members", lambda: len(self.runtime.discovery.members()))
+        # Data-plane (transport) gauges: rails (NICs) and cumulative timeouts /
+        # channel discards surfaced from the C++ engine (0 on the TCP fallback).
+        def _tstat(key):
+            try:
+                return self.runtime.transport.stats().get(key, 0)
+            except Exception:
+                return 0
+        m.set_gauge_provider("rdma_rails", lambda: _tstat("rails"))
+        m.set_gauge_provider("rdma_read_timeouts", lambda: _tstat("read_timeouts"))
+        m.set_gauge_provider("rdma_channel_discards", lambda: _tstat("channel_discards"))
 
     # ------------------------------------------------------------------ #
     # Disk promote: load a key from disk back into the pool (makes it readable)
@@ -539,11 +549,18 @@ class PeerCacheStore(HiCacheStorage):
         if op_index:
             oks = self.runtime.transport.batch_read_multi(
                 r_nodes, r_local, r_remote, r_len, rail_eps, rail_rks)
+            failed = 0
             for j, ok in enumerate(oks):
                 idx = op_index[j]
                 results[idx] = bool(ok)
                 if ok:
                     sources[idx] = "disk" if idx in promoted else "remote"
+                else:
+                    failed += 1
+            # A resident location was found but the RDMA READ failed (timeout /
+            # fabric error) -- distinct from a directory miss.
+            if failed:
+                self._metrics.inc("read_failures", failed)
 
         latency = time.perf_counter() - t0
         for i in range(len(comp_keys)):
@@ -724,6 +741,10 @@ class PeerCacheStore(HiCacheStorage):
             self._key_len.clear()
 
     def close(self) -> None:
+        # Idempotent: safe to call from both an explicit shutdown and atexit.
+        if getattr(self, "_closed", False):
+            return
+        self._closed = True
         try:
             self._prefetch.shutdown(wait=False)
         except Exception:

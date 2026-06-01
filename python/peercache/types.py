@@ -5,6 +5,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field, asdict
 from typing import List, Optional
 
+# Bumped when the on-the-wire directory entry (DataLocation) layout changes in a
+# way readers must be aware of. Old fields are only ever added, never removed or
+# repurposed, so from_dict stays tolerant across versions. Current additions:
+#   v1: base (node_id, rdma_endpoint, remote_addr, rkey, length, resident)
+#   v2: + rail_endpoints[]/rail_rkeys[] (multi-NIC)
+DIRECTORY_SCHEMA_VERSION = 2
+
 
 @dataclass
 class NodeInfo:
@@ -71,10 +78,14 @@ class DataLocation:
         return self.rail_rkeys or [self.rkey]
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        d = asdict(self)
+        d["v"] = DIRECTORY_SCHEMA_VERSION  # schema version for forward/back compat
+        return d
 
     @classmethod
     def from_dict(cls, d: dict) -> "DataLocation":
+        # Tolerant of any schema version: unknown keys are ignored and missing
+        # newer fields fall back to single-rail / legacy values.
         return cls(
             node_id=d["node_id"],
             rdma_endpoint=d["rdma_endpoint"],

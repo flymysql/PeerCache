@@ -114,6 +114,44 @@ class PeerCacheConfig:
         self.disk_enabled = _as_bool(self.disk_enabled)
         self.metrics_enabled = _as_bool(self.metrics_enabled)
         self.metrics_dashboard = _as_bool(self.metrics_dashboard)
+        self._validate()
+
+    def _validate(self) -> None:
+        """Fail fast on misconfiguration with an actionable message."""
+        if self.protocol not in ("rdma", "tcp"):
+            raise ValueError(
+                f"peercache: protocol must be 'rdma' or 'tcp', got {self.protocol!r}"
+            )
+        if ":" not in self.discovery_addr:
+            raise ValueError(
+                "peercache: discovery_addr must be 'host:port', got "
+                f"{self.discovery_addr!r}"
+            )
+        if not (1 <= int(self.ib_port) <= 255):
+            raise ValueError(f"peercache: ib_port must be 1..255, got {self.ib_port}")
+        if int(self.gid_index) < -1:
+            raise ValueError(
+                f"peercache: gid_index must be >= -1 (-1 disables GRH), got "
+                f"{self.gid_index}"
+            )
+        if int(self.global_segment_size) <= 0:
+            raise ValueError(
+                "peercache: global_segment_size must be > 0, got "
+                f"{self.global_segment_size}"
+            )
+        if int(getattr(self, "max_channels_per_peer", 1)) < 1:
+            raise ValueError("peercache: max_channels_per_peer must be >= 1")
+        # Multi-rail: duplicate devices would make rails pair to the same NIC and
+        # waste channels; flag it (named devices only -- "" means auto-pick).
+        named = [d for d in self._rails if d]
+        dupes = {d for d in named if named.count(d) > 1}
+        if dupes:
+            raise ValueError(
+                "peercache: device_names has duplicate device(s) "
+                f"{sorted(dupes)}; each rail must be a distinct NIC. Rails pair "
+                "by index across nodes, so list the same distinct devices in the "
+                "same order on every node."
+            )
 
     def device_rails(self) -> list:
         """Ordered list of RDMA device names, one per rail (>=1)."""

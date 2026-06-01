@@ -1,5 +1,7 @@
 #pragma once
 
+#include <atomic>
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <string>
@@ -56,11 +58,19 @@ class TransferEngine {
   std::string local_endpoint() const;
   std::vector<std::string> local_endpoints() const;
 
+  // Cumulative data-plane counters for observability:
+  //   read_timeouts   - drain() calls that hit the deadline (silent fabric)
+  //   channel_discards- channels torn down after a timeout (not reused)
+  //   rails           - number of RDMA rails (NICs) in this engine
+  std::map<std::string, uint64_t> stats() const;
+
  private:
   std::string bind_host_;
   std::vector<std::unique_ptr<RdmaContext>> ctxs_;
   std::vector<std::unique_ptr<ConnectionManager>> conns_;
   std::vector<uint16_t> ports_;
+  std::atomic<uint64_t> read_timeouts_{0};
+  std::atomic<uint64_t> channel_discards_{0};
 };
 
 }  // namespace peercache
