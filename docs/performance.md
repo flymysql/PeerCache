@@ -40,14 +40,14 @@ and a single box scales to **0.27 TB/s** aggregate across 8 NICs.
 | NICs | 8 × Mellanox `mlx5` RoCE, bonded (`mlx5_bond_1..8`) |
 | RoCE | RoCEv2, GID index 3, **MTU 4096** |
 | Single-NIC line rate | ≈ 400 Gb/s (bare READ measured 392 Gbps) |
-| OS / kernel | Linux 5.4.241 (tlinux4), x86_64, glibc 2.35 |
-| Logical CPUs | 384 |
+| OS / kernel | Linux 5.4.241-1-tlinux4-0017.7, x86_64, glibc 2.35 |
+| CPU | 2 × AMD EPYC 9K84, 96 cores/socket (192 cores / 384 threads) |
+| Host RAM | 2.2 TB (≈ 1.16 TB per NUMA node) |
+| NUMA topology | 2 nodes; NICs 1–4 → node 0, 5–8 → node 1; node distance 10 (local) / 32 (remote) |
+| NIC model / FW | Mellanox ConnectX-7 (board `MT_0000000834`), FW 28.39.1002 |
+| rdma-core / OFED | MLNX_OFED 5.8-2.0.3.0 |
 | PeerCache | 0.5.x (RDMA build) |
 | Transport | `--protocol rdma`, layout `mla` |
-| NIC model / FW | _fill in_ |
-| Host RAM | _fill in_ |
-| NUMA topology | _fill in_ |
-| rdma-core / OFED | _fill in_ |
 
 ??? info "Commands to capture the environment (fill in the blanks)"
     ```bash
@@ -127,10 +127,13 @@ local NIC). Here: 8 NICs × 4 reader processes each, 1 MiB pages.
 
 The aggregate scales far past a single process (147 → 273 GB/s) but is **no
 longer NIC-bound** — it is limited by host memory bandwidth / PCIe and by an
-**imbalance** (two NICs at ~17 GB/s while others reach 35–50). That imbalance is
-typically NUMA placement: bind each process group to its NIC's NUMA node with
+**imbalance** (two NICs at ~17 GB/s while others reach 35–50). On this box NICs
+1–4 sit on NUMA node 0 and 5–8 on node 1 (remote-node distance 32 vs 10 local),
+so a reader that isn't pinned can land on the wrong node and pay the cross-NUMA
+penalty. Bind each process group to its NIC's NUMA node with
 `numactl --cpunodebind=<n> --membind=<n>` (the reproduce scripts do this when
-`numactl` is installed) and verify both bond slaves carry traffic.
+`numactl` is installed) and verify both bond slaves carry traffic; this is
+expected to recover the slow NICs and lift the aggregate.
 
 ## Key takeaways
 
