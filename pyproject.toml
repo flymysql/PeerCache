@@ -4,7 +4,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "peercache"
-version = "0.6.0"
+version = "0.6.1"
 description = "Peer-to-peer RDMA zero-copy L3 KV-cache backend for SGLang HiCache"
 readme = "README.md"
 requires-python = ">=3.9"

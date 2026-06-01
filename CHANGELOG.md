@@ -6,6 +6,18 @@ All notable changes to PeerCache are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-06-01
+
+### Fixed
+- **SGLang dynamic-backend registration on newer SGLang** ("Backend class
+  PeerCacheStore must inherit from HiCacheStorage"). `peercache.store` imported
+  `HiCacheStorage` together with optional names (`HiCacheStorageConfig`,
+  `HiCacheStorageExtraInfo`, `PoolName`) in one statement; if any optional name
+  was absent in the installed SGLang, the whole import fell back to a stand-in
+  base class and `PeerCacheStore` was no longer a subclass of SGLang's real
+  `HiCacheStorage`, so SGLang rejected it. The base class is now imported on its
+  own and the optional names degrade independently.
+
 ### Changed
 - Refreshed the **full-machine performance baseline** (docs + README + overview
   + charts): 8-NIC multi-process aggregate **273 → 413 GB/s (≈ 3.3 Tbps)** with
@@ -224,6 +236,7 @@ Initial release.
   lightweight TCP RPC.
 - MkDocs SDK documentation site and GitHub Actions for CI, docs, and release.
 
+[0.6.1]: https://github.com/flymysql/PeerCache/releases/tag/v0.6.1
 [0.6.0]: https://github.com/flymysql/PeerCache/releases/tag/v0.6.0
 [0.5.1]: https://github.com/flymysql/PeerCache/releases/tag/v0.5.1
 [0.5.0]: https://github.com/flymysql/PeerCache/releases/tag/v0.5.0
