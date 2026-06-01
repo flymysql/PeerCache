@@ -324,8 +324,12 @@ def _setup_consumer(args, node_id: str, expect_nodes: int):
     """Bring up a consumer store, join the ring, register a pool, wait for data."""
     pt = _page_total(args.page_size, args.layout)
     consumer_slots = max(_csv_ints(args.concurrencies)) * args.batch_size
-    seg_bytes = args.global_segment_size or int(
-        max(args.working_set, consumer_slots) * pt * 1.3)
+    # The consumer never publishes (it only READs into its recv pool), so its
+    # backend published pool is unused -- size it to the read slots only, NOT to
+    # the working set. Otherwise each reader process would allocate
+    # working_set*page_size bytes of idle host memory, which OOMs at scale with
+    # large pages (e.g. 1 MiB pages x big working set x many processes).
+    seg_bytes = args.global_segment_size or int(max(consumer_slots, 64) * pt * 1.3)
     store = _make_store(args, node_id, seg_bytes)
     print(f"[drive] {node_id} up: rdma={store.runtime.local_rdma_endpoint} "
           f"discovery={args.discovery_addr} op={args.op}", flush=True)
