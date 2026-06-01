@@ -33,6 +33,20 @@ flowchart LR
 | coordination | master allocates / tracks objects | only service discovery, embedded in a node |
 | transfer | RDMA zero-copy | RDMA zero-copy (one-sided READ) |
 
+## Performance at a glance
+
+Measured cross-host on RDMA (GET, MLA; 2× AMD EPYC 9K84 + 8× ConnectX-7, RoCEv2,
+MTU 4096):
+
+| scenario | GET throughput |
+|---|---|
+| single NIC, PeerCache | **46.0 GB/s** — **~94%** of bare `ib_read_bw` (49.0 GB/s) |
+| single process, 8 rails (1 MiB pages) | **147.6 GB/s** (1.18 Tbps) |
+| full machine, 8 NICs, multi-process | **273.0 GB/s** (≈ 2.18 Tbps) |
+
+See the [Performance baseline](performance.md) for charts, methodology, and
+reproduce commands.
+
 ## Core ideas
 
 - **Embedded discovery, no separate meta node** — you set `discovery_addr` to one
