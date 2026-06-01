@@ -43,6 +43,8 @@ flowchart LR
 | 单进程，8 rail（1 MiB 页） | **147.6 GB/s**（1.18 Tbps） |
 | 整机，8 卡，多进程 | **273.0 GB/s**（≈ 2.18 Tbps） |
 
+![PeerCache GET 吞吐：单卡 → 整机](assets/perf/scaling_ladder.png)
+
 图表、方法论与复现命令见 [性能基线](performance.md)。
 
 ## 核心理念
