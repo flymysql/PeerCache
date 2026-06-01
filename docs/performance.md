@@ -27,10 +27,12 @@ regimes and what bounds each:
 | Bare `ib_read_bw`, 1 NIC, 16 QP | **49.0 GB/s** (392 Gbps) | 100% | hardware ceiling of one NIC |
 | PeerCache, 1 NIC, 8 processes | **46.0 GB/s** (368 Gbps) | 94% | storage-layer overhead ≈ 6% |
 | PeerCache, **1 process**, 8 rails, 1 MiB pages | **147.6 GB/s** (1.18 Tbps) | — | GIL-bounded; ≈ 3 NICs' worth |
-| PeerCache, **8 NICs**, multi-process, 1 MiB pages | **273.0 GB/s** (2.18 Tbps) | — | ≈ 70% of the 8-NIC bare ceiling |
+| PeerCache, **8 NICs**, multi-process, 128 KiB pages | **413.1 GB/s** (3.3 Tbps) | — | per-NIC 25–89 GB/s; mem/PCIe/NUMA-bound |
 
 The takeaway: PeerCache reaches **~94% of bare `ib_read_bw` on a single NIC**,
-and a single box scales to **0.27 TB/s** aggregate across 8 NICs.
+and a single box scales to **0.41 TB/s** aggregate across 8 NICs. (Under full
+multi-process load a single NIC reached **89 GB/s** — the 16-QP `ib_read_bw`
+figure above is a conservative single-NIC reference, not a hard cap.)
 
 ## Test environment
 
@@ -112,23 +114,24 @@ saturate all 8** — for that, use multiple processes.
 
 The production shape (and the way to fill every NIC) is **one process group per
 NIC** — exactly how an SGLang TP=8 deployment runs (8 ranks, each pinned to its
-local NIC). Here: 8 NICs × 4 reader processes each, 1 MiB pages.
+local NIC). Here: 8 NICs × 8 reader processes each, 128 KiB pages.
 
 <figure markdown>
   ![Per-NIC throughput](assets/perf/per_card.png)
-  <figcaption>Per-NIC GET throughput; the 8 sum to 273.0 GB/s (≈ 2.18 Tbps).</figcaption>
+  <figcaption>Per-NIC GET throughput; the 8 sum to 413.1 GB/s (≈ 3.3 Tbps).</figcaption>
 </figure>
 
 | metric | value |
 |---|---|
-| **Aggregate GET** | **273.0 GB/s (2.18 Tbps)** |
-| Per-NIC range | 16.9 – 50.1 GB/s |
-| Fraction of 8-NIC bare ceiling (≈ 392 GB/s) | ≈ 70% |
+| **Aggregate GET** | **413.1 GB/s (3.3 Tbps)** |
+| Per-NIC range | 25.1 – 89.4 GB/s (avg ≈ 51.6) |
+| Config | 8 NICs × 8 reader processes, 128 KiB pages |
 
-The aggregate scales far past a single process (147 → 273 GB/s) but is **no
-longer NIC-bound** — it is limited by host memory bandwidth / PCIe and by an
-**imbalance** (two NICs at ~17 GB/s while others reach 35–50). On this box NICs
-1–4 sit on NUMA node 0 and 5–8 on node 1 (remote-node distance 32 vs 10 local),
+The aggregate scales far past a single process (147 → 413 GB/s) and a single NIC
+reached **89 GB/s** here, so it is **not NIC-bound** — the limit is host memory
+bandwidth / PCIe and an **imbalance** (two NICs at ~25 GB/s while others reach
+49–89). On this box NICs 1–4 sit on NUMA node 0 and 5–8 on node 1 (remote-node
+distance 32 vs 10 local),
 so a reader that isn't pinned can land on the wrong node and pay the cross-NUMA
 penalty. Bind each process group to its NIC's NUMA node with
 `numactl --cpunodebind=<n> --membind=<n>` (the reproduce scripts do this when
@@ -198,6 +201,13 @@ peercache-bench drive --discovery-addr PRODUCER_IP:31998 --device-name mlx5_bond
 
 `--gpu` allocates the read destination in GPU memory; a registration failure
 raises an error naming the missing prerequisite.
+
+Measured (1 process, 8 rails, 1 MiB pages, recv in VRAM): **49.5 GB/s at 100%
+hit** vs. 140 GB/s with a host recv buffer. This is **single-GPU PCIe-bound** —
+all 8 rails write into one GPU, so they share that GPU's PCIe link (≈ 50 GB/s on
+Gen5 x16). In a real SGLang TP=N deployment each rank reads into **its own** GPU,
+so GPUDirect scales with the number of GPUs (≈ N × per-GPU PCIe bandwidth)
+instead of being capped by a single link.
 
 ## Caveats
 

@@ -55,7 +55,7 @@ flowchart LR
 |---|---|
 | 单卡，PeerCache | **46.0 GB/s** —— 裸 `ib_read_bw`（49.0 GB/s）的 **~94%** |
 | 单进程，8 rail（1 MiB 页） | **147.6 GB/s**（1.18 Tbps） |
-| 整机，8 卡，多进程 | **273.0 GB/s**（≈ 2.18 Tbps） |
+| 整机，8 卡，多进程 | **413.1 GB/s**（≈ 3.3 Tbps） |
 
 ![PeerCache GET 吞吐：单卡 → 整机](assets/perf/scaling_ladder.png)
 
