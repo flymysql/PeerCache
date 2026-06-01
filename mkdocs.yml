@@ -36,6 +36,7 @@ nav:
   - Architecture: architecture.md
   - SDK Reference: sdk.md
   - Benchmarks: benchmarks.md
+  - Performance Baseline: performance.md
   - Changelog: changelog.md
 
 markdown_extensions:
@@ -72,6 +73,7 @@ plugins:
             Architecture: 架构
             SDK Reference: SDK 参考
             Benchmarks: 性能基准测试
+            Performance Baseline: 性能基线
             Changelog: 更新日志
 
 extra:

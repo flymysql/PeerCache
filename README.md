@@ -161,6 +161,19 @@ single console command (no repo clone, no `PYTHONPATH`). It drives PeerCache's
 (pages/s, tokens/s, GB/s) and latency tail (p50/p95/p99/p999/max) across a sweep
 of thread models, including the full-load saturation/peak throughput.
 
+### Measured baseline (cross-host RDMA, GET, MLA)
+
+On 2× AMD EPYC 9K84 + 8× ConnectX-7 (RoCEv2, MTU 4096, MLNX_OFED 5.8):
+
+| scenario | GET throughput |
+|---|---|
+| single NIC, PeerCache | **46.0 GB/s** (368 Gbps) — **~94%** of bare `ib_read_bw` (49.0 GB/s) |
+| single process, 8 rails (1 MiB pages) | **147.6 GB/s** (1.18 Tbps) |
+| full machine, 8 NICs, multi-process | **273.0 GB/s** (≈ 2.18 Tbps) |
+
+Methodology, charts, and reproduce commands:
+[Performance baseline](https://flymysql.github.io/PeerCache/performance/).
+
 ```bash
 pip install peercache
 
