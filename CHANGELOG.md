@@ -6,6 +6,13 @@ All notable changes to PeerCache are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+- **"Positioning & comparison" docs page** (EN/中文): what PeerCache is (a
+  decentralized P2P prefix/KV-reuse cache) and is not (not a PD transfer engine),
+  the two orthogonal axes (reuse vs P→D handoff), a comparison vs centralized KV
+  stores (Mooncake Store / LMCache), the advantages, the trade-offs deliberately
+  accepted, and a when-to-use decision guide.
+
 ## [0.6.1] - 2026-06-01
 
 ### Fixed
