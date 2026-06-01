@@ -9,20 +9,35 @@ pages, and decode workers read them back over RDMA with zero CPU copies.
 
 ```mermaid
 flowchart LR
-    subgraph nodeW [Node W - writer / embedded meta]
-      D[Embedded discovery:<br/>register / heartbeat / members]
-      PW[Published pool MR]
-      DW[Directory shard]
+    subgraph W["Node W · prefill / writer (hosts embedded meta)"]
+      direction TB
+      META(["Embedded discovery<br/>register · heartbeat · members"])
+      PW[("Published pool MR<br/>source of READ")]
+      DW["Directory shard"]
     end
-    subgraph nodeR [Node R - reader]
-      HR[Host KV buffer - recv MR]
-      DR[Directory shard]
+
+    subgraph R["Node R · decode / reader"]
+      direction TB
+      RECV[("Host KV buffer · recv MR<br/>destination of READ")]
+      DR["Directory shard"]
     end
-    nodeR -. register/heartbeat .-> D
-    nodeW -->|"PUT key to hash(key) owner"| DR
-    nodeR -->|"GET key from hash(key) owner"| DR
-    nodeR ==>|one-sided RDMA READ| PW
+
+    R -. "register / heartbeat" .-> META
+    W -- "set: PUT key→loc" --> DR
+    R -- "get: GET key→loc" --> DR
+    PW == "one-sided RDMA READ (zero copy)" ==> RECV
+
+    classDef mr fill:#e8eaf6,stroke:#3f51b5,color:#1a237e;
+    classDef dir fill:#fff3e0,stroke:#fb8c00,color:#e65100;
+    classDef disc fill:#e0f2f1,stroke:#00897b,color:#004d40;
+    class PW,RECV mr
+    class DW,DR dir
+    class META disc
 ```
+
+The directory is sharded across **every** node (here the example key is owned by
+Node R's shard); each node also hosts a shard of its own. Discovery is embedded
+in the `discovery_addr` node — no separate meta process.
 
 ## Why PeerCache?
 
