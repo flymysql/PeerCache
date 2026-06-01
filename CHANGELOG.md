@@ -6,6 +6,12 @@ All notable changes to PeerCache are documented here. The format is based on
 
 ## [Unreleased]
 
+### Changed
+- Refreshed the **full-machine performance baseline** (docs + README + overview
+  + charts): 8-NIC multi-process aggregate **273 → 413 GB/s (≈ 3.3 Tbps)** with
+  8 reader processes/NIC at 128 KiB pages; added the measured GPUDirect result
+  (49.5 GB/s, single-GPU PCIe-bound) and noted the per-NIC range (25–89 GB/s).
+
 ## [0.6.0] - 2026-06-01
 
 ### Added
