@@ -6,6 +6,21 @@ All notable changes to PeerCache are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-05-31
+
+### Fixed
+- **`peercache-bench serve` now re-publishes when ring membership changes**, so
+  back-to-back `drive` runs against one long-lived `serve` work without a
+  restart. The directory is consistent-hash sharded across the live ring, and a
+  `drive` reader hosts part of it; when one run's reader exits and the next
+  starts (a fresh process, reusing the same node_id but with an empty directory
+  shard), the previously published entries for keys owned by that shard were
+  lost and the new run timed out in "waiting for the producer's working set".
+  `serve` now watches membership (keyed on each member's control endpoint, so a
+  re-run is detected even though the node_id is reused) and re-shards the
+  directory for the current members. Departed readers are also pruned faster
+  (`member_ttl` 30s -> 5s in the bench).
+
 ## [0.5.0] - 2026-05-31
 
 ### Added
@@ -166,6 +181,7 @@ Initial release.
   lightweight TCP RPC.
 - MkDocs SDK documentation site and GitHub Actions for CI, docs, and release.
 
+[0.5.1]: https://github.com/flymysql/PeerCache/releases/tag/v0.5.1
 [0.5.0]: https://github.com/flymysql/PeerCache/releases/tag/v0.5.0
 [0.4.0]: https://github.com/flymysql/PeerCache/releases/tag/v0.4.0
 [0.3.0]: https://github.com/flymysql/PeerCache/releases/tag/v0.3.0
