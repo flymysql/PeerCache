@@ -54,7 +54,7 @@ class PeerCacheConfig:
 
     # Consistent-hash directory.
     vnodes: int = 160  # virtual nodes per physical node
-    directory_replicas: int = 1  # >1 replicates directory entries for HA
+    directory_replicas: int = 2  # replicate directory entries for HA on node loss
     # Cache resolved *resident* read locations for this many seconds to skip the
     # per-batch directory lookup (a cross-node RPC) on hot, static working sets.
     # 0 disables the cache. Entries are invalidated immediately on a read miss
