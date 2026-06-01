@@ -58,9 +58,18 @@ def _warn_unpinned(reason: str) -> None:
         )
 
 
-def alloc_host_buffer(size: int):
-    """(keepalive, base_addr). Prefer torch pinned memory for real RDMA; the
-    ctypes fallback still registers fine, just not page-locked."""
+def alloc_host_buffer(size: int, device: str = "cpu"):
+    """(keepalive, base_addr).
+
+    device="cuda" allocates GPU memory (its data_ptr is a device VA) to exercise
+    GPUDirect RDMA -- reads land straight in GPU memory. Otherwise prefer torch
+    pinned host memory for real RDMA; the ctypes fallback still registers fine,
+    just not page-locked."""
+    if device == "cuda":
+        import torch  # required for --gpu; let ImportError surface clearly
+
+        t = torch.empty(size, dtype=torch.uint8, device="cuda")
+        return t, t.data_ptr()
     try:
         import torch
 
@@ -102,15 +111,17 @@ class HostKVPool:
     layout     : "mla" (1 object/page) or "mha" (2 objects/page: k and v).
     """
 
-    def __init__(self, page_bytes: int, num_slots: int, layout: str = "mla") -> None:
+    def __init__(self, page_bytes: int, num_slots: int, layout: str = "mla",
+                 device: str = "cpu") -> None:
         assert layout in ("mla", "mha")
         self.page_bytes = page_bytes
         self.num_slots = num_slots
         self.layout = layout
+        self.device = device
         self.comps = 1 if layout == "mla" else 2
         self.slot_stride = page_bytes * self.comps
         total = self.slot_stride * num_slots
-        self._keepalive, self._base = alloc_host_buffer(total)
+        self._keepalive, self._base = alloc_host_buffer(total, device=device)
         self.kv_buffer = _KVBuffer(self._base, total, self._keepalive)
 
     def get_page_buffer_meta(self, host_indices):

@@ -31,6 +31,9 @@ class TransferEngine {
   // Register a host buffer on every rail. Returns one MrHandle per rail (same
   // addr/length; lkey/rkey differ per device).
   std::vector<MrHandle> register_mr(uint64_t addr, uint64_t length);
+  // Register a dmabuf-backed region (GPU memory) on every rail for GPUDirect.
+  std::vector<MrHandle> register_mr_dmabuf(uint64_t addr, uint64_t length,
+                                           int fd, uint64_t fd_offset);
   void deregister_mr(uint64_t addr);
 
   // Legacy single-rail reads (rail 0 only). Kept for back-compat.
