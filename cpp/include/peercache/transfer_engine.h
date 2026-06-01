@@ -1,5 +1,7 @@
 #pragma once
 
+#include <atomic>
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <string>
@@ -29,6 +31,9 @@ class TransferEngine {
   // Register a host buffer on every rail. Returns one MrHandle per rail (same
   // addr/length; lkey/rkey differ per device).
   std::vector<MrHandle> register_mr(uint64_t addr, uint64_t length);
+  // Register a dmabuf-backed region (GPU memory) on every rail for GPUDirect.
+  std::vector<MrHandle> register_mr_dmabuf(uint64_t addr, uint64_t length,
+                                           int fd, uint64_t fd_offset);
   void deregister_mr(uint64_t addr);
 
   // Legacy single-rail reads (rail 0 only). Kept for back-compat.
@@ -56,11 +61,19 @@ class TransferEngine {
   std::string local_endpoint() const;
   std::vector<std::string> local_endpoints() const;
 
+  // Cumulative data-plane counters for observability:
+  //   read_timeouts   - drain() calls that hit the deadline (silent fabric)
+  //   channel_discards- channels torn down after a timeout (not reused)
+  //   rails           - number of RDMA rails (NICs) in this engine
+  std::map<std::string, uint64_t> stats() const;
+
  private:
   std::string bind_host_;
   std::vector<std::unique_ptr<RdmaContext>> ctxs_;
   std::vector<std::unique_ptr<ConnectionManager>> conns_;
   std::vector<uint16_t> ports_;
+  std::atomic<uint64_t> read_timeouts_{0};
+  std::atomic<uint64_t> channel_discards_{0};
 };
 
 }  // namespace peercache

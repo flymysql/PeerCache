@@ -132,6 +132,14 @@ class PublishedPool:
             self._on_evict(evicted)
         return remote_addr
 
+    def snapshot(self) -> List[Tuple[str, int, int]]:
+        """Return [(key, remote_addr, length)] for all currently-resident pages.
+
+        Used to re-publish directory entries after a ring-membership change so
+        the entries re-shard onto the current owners."""
+        with self._lock:
+            return [(k, self._base + off, ln) for k, (off, ln) in self._entries.items()]
+
     def remove(self, key: str) -> None:
         with self._lock:
             entry = self._entries.pop(key, None)

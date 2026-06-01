@@ -38,6 +38,8 @@ _COUNTERS = (
     "disk_bytes_written",
     "disk_evictions",
     "promotes",
+    "read_failures",  # entry found but the RDMA READ itself failed
+    "directory_republishes",  # re-shard events after a membership change
 )
 
 _QUANTILES = (0.5, 0.9, 0.99)

@@ -53,6 +53,14 @@ class Transport:
     def register_mr(self, addr: int, length: int) -> Mr:  # pragma: no cover
         raise NotImplementedError
 
+    def register_mr_dmabuf(self, addr: int, length: int, fd: int,
+                           fd_offset: int = 0) -> Mr:
+        """Register a dmabuf-backed (e.g. GPU) region for GPUDirect RDMA.
+
+        Only the RDMA transport supports this; the TCP fallback cannot read
+        device memory, so it is not implemented there."""
+        raise NotImplementedError("dmabuf MR registration requires the RDMA transport")
+
     def deregister_mr(self, addr: int) -> None:  # pragma: no cover
         raise NotImplementedError
 
@@ -81,6 +89,10 @@ class Transport:
 
     def n_rails(self) -> int:
         return 1
+
+    def stats(self) -> dict:
+        """Cumulative data-plane counters (read_timeouts, channel_discards, rails)."""
+        return {"read_timeouts": 0, "channel_discards": 0, "rails": self.n_rails()}
 
     def local_endpoints(self) -> List[str]:
         return [self.local_endpoint()]
@@ -144,6 +156,12 @@ class RdmaTransport(Transport):
         lkeys = [h.lkey for h in handles]
         return Mr(addr=addr, rkey=rkeys[0], lkey=lkeys[0], rkeys=rkeys, lkeys=lkeys)
 
+    def register_mr_dmabuf(self, addr: int, length: int, fd: int, fd_offset: int = 0) -> Mr:
+        handles = self._engine.register_mr_dmabuf(addr, length, fd, fd_offset)
+        rkeys = [h.rkey for h in handles]
+        lkeys = [h.lkey for h in handles]
+        return Mr(addr=addr, rkey=rkeys[0], lkey=lkeys[0], rkeys=rkeys, lkeys=lkeys)
+
     def deregister_mr(self, addr: int) -> None:
         self._engine.deregister_mr(addr)
 
@@ -172,6 +190,9 @@ class RdmaTransport(Transport):
         return list(self._engine.batch_read_multi(
             node_ids, local_addrs, remote_addrs, lengths,
             rail_endpoints, rail_rkeys))
+
+    def stats(self) -> dict:
+        return dict(self._engine.stats())
 
     def local_endpoint(self) -> str:
         return self._engine.local_endpoint()

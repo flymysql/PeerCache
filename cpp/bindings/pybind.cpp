@@ -67,6 +67,9 @@ PYBIND11_MODULE(_peercache, m) {
       .def("n_rails", &TransferEngine::n_rails)
       .def("register_mr", &TransferEngine::register_mr, py::arg("addr"),
            py::arg("length"))
+      .def("register_mr_dmabuf", &TransferEngine::register_mr_dmabuf,
+           py::arg("addr"), py::arg("length"), py::arg("fd"),
+           py::arg("fd_offset") = 0)
       .def("deregister_mr", &TransferEngine::deregister_mr, py::arg("addr"))
       .def("batch_read", &TransferEngine::batch_read, py::arg("requests"),
            py::call_guard<py::gil_scoped_release>())
@@ -79,7 +82,8 @@ PYBIND11_MODULE(_peercache, m) {
            py::arg("lengths"), py::arg("rail_endpoints"), py::arg("rail_rkeys"),
            py::call_guard<py::gil_scoped_release>())
       .def("local_endpoint", &TransferEngine::local_endpoint)
-      .def("local_endpoints", &TransferEngine::local_endpoints);
+      .def("local_endpoints", &TransferEngine::local_endpoints)
+      .def("stats", &TransferEngine::stats);
 }
 
 #endif

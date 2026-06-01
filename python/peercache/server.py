@@ -59,6 +59,7 @@ def host_is_self(host: str, local_hostname: str) -> bool:
 class NodeRuntime:
     def __init__(self, config: PeerCacheConfig, transport: Optional[Transport] = None):
         self.config = config
+        self._member_listeners: List = []
 
         # Embedded meta: there is no separate meta node. The node whose IP matches
         # `discovery_addr` automatically hosts the discovery service. Start it
@@ -121,14 +122,32 @@ class NodeRuntime:
             replicas=config.directory_replicas,
         )
 
+    def add_member_listener(self, fn) -> None:
+        """Register a callback invoked (after the ring is updated) whenever the
+        live membership changes. Used by the store to re-shard the directory."""
+        self._member_listeners.append(fn)
+
     def _on_members(self, members: List[NodeInfo]) -> None:
-        self.ring.set_nodes([m.node_id for m in members])
-        logger.debug("peercache membership: %s", [m.node_id for m in members])
+        node_ids = [m.node_id for m in members]
+        changed = set(node_ids) != set(self.ring.nodes)
+        self.ring.set_nodes(node_ids)
+        logger.debug("peercache membership: %s", node_ids)
+        if changed:
+            for fn in self._member_listeners:
+                try:
+                    fn(members)
+                except Exception as e:  # a listener must never break discovery
+                    logger.debug("peercache: member listener failed: %s", e)
 
     def start(self) -> None:
         self.discovery.start()
 
     def stop(self) -> None:
+        # Idempotent. Deregister from discovery FIRST so peers drop us from the
+        # ring (stop routing here) before we tear down the RPC/RDMA endpoints.
+        if getattr(self, "_stopped", False):
+            return
+        self._stopped = True
         self.discovery.stop()
         self._rpc.stop()
         self.transport.close()
