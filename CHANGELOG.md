@@ -7,6 +7,13 @@ All notable changes to PeerCache are documented here. The format is based on
 ## [Unreleased]
 
 ### Added
+- **GPUDirect RDMA**: the receive buffer (read destination) may live in GPU
+  memory so pages land straight in VRAM with no host bounce. Buffers that expose
+  a dmabuf fd register via `ibv_reg_dmabuf_mr` (`TransferEngine.register_mr_dmabuf`);
+  otherwise a plain MR of the device VA is used (works with `nvidia-peermem`).
+  Registration failures raise a clear error pointing at the GPUDirect
+  prerequisites. New `peercache-bench drive --gpu` allocates the recv MR in GPU
+  memory to measure the GPUDirect path.
 - **Config validation**: `PeerCacheConfig` now fails fast with actionable errors
   on a bad `protocol`/`discovery_addr`/`ib_port`/`gid_index`/`global_segment_size`
   and on duplicate `device_names` (rails must be distinct NICs).

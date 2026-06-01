@@ -79,6 +79,31 @@ MrHandle RdmaContext::register_mr(uint64_t addr, uint64_t length) {
   return h;
 }
 
+MrHandle RdmaContext::register_mr_dmabuf(uint64_t addr, uint64_t length, int fd,
+                                         uint64_t fd_offset) {
+  int access = IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_READ |
+               IBV_ACCESS_REMOTE_WRITE;
+  ibv_mr* mr = ibv_reg_dmabuf_mr(pd_, fd_offset, static_cast<size_t>(length),
+                                 addr, fd, access);
+  if (!mr) {
+    throw std::runtime_error(
+        "peercache: ibv_reg_dmabuf_mr failed -- needs rdma-core>=33 and a NIC + "
+        "driver with GPUDirect/dmabuf support (ConnectX + MOFED, or "
+        "nvidia-peermem). Check the dmabuf fd/offset and that the device "
+        "supports peer memory.");
+  }
+  {
+    std::lock_guard<std::mutex> lk(mu_);
+    mrs_[addr] = {length, mr};
+  }
+  MrHandle h;
+  h.addr = addr;
+  h.length = length;
+  h.lkey = mr->lkey;
+  h.rkey = mr->rkey;
+  return h;
+}
+
 void RdmaContext::deregister_mr(uint64_t addr) {
   std::lock_guard<std::mutex> lk(mu_);
   auto it = mrs_.find(addr);

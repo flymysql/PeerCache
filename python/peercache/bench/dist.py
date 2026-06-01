@@ -331,10 +331,13 @@ def _setup_consumer(args, node_id: str, expect_nodes: int):
     # large pages (e.g. 1 MiB pages x big working set x many processes).
     seg_bytes = args.global_segment_size or int(max(consumer_slots, 64) * pt * 1.3)
     store = _make_store(args, node_id, seg_bytes)
+    device = "cuda" if getattr(args, "gpu", False) else "cpu"
     print(f"[drive] {node_id} up: rdma={store.runtime.local_rdma_endpoint} "
-          f"discovery={args.discovery_addr} op={args.op}", flush=True)
+          f"discovery={args.discovery_addr} op={args.op} recv={device}", flush=True)
     _wait_ring(store, expect_nodes, args.connect_timeout)
-    pool = HostKVPool(args.page_size, consumer_slots, layout=args.layout)
+    # GPUDirect: with --gpu the read destination (recv MR) is GPU memory, so
+    # pages land straight in VRAM (needs nvidia-peermem / a dmabuf-capable stack).
+    pool = HostKVPool(args.page_size, consumer_slots, layout=args.layout, device=device)
     store.register_mem_pool_host(pool)
     keys = [f"{KEY_PREFIX}/{i}" for i in range(args.working_set)]
     print(f"[drive] {node_id} waiting for the producer's working set ...", flush=True)
@@ -475,6 +478,10 @@ def add_subparsers(sub) -> None:
         "drive", help="consumer/driver: run a cross-host concurrency sweep")
     _common(p_drive)
     p_drive.add_argument("--op", default="get", choices=["get", "exists"])
+    p_drive.add_argument("--gpu", action="store_true",
+                         help="GPUDirect: allocate the read destination (recv MR) "
+                              "in GPU memory so pages land in VRAM (needs torch+CUDA "
+                              "and nvidia-peermem / a dmabuf-capable RDMA stack)")
     p_drive.add_argument("--batch-size", type=int, default=32)
     p_drive.add_argument("--concurrencies", default="1,2,4,8,16,32,64")
     p_drive.add_argument("--duration", type=float, default=10.0)

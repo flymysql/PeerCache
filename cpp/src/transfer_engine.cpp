@@ -56,6 +56,17 @@ std::vector<MrHandle> TransferEngine::register_mr(uint64_t addr,
   return handles;
 }
 
+std::vector<MrHandle> TransferEngine::register_mr_dmabuf(uint64_t addr,
+                                                         uint64_t length, int fd,
+                                                         uint64_t fd_offset) {
+  std::vector<MrHandle> handles;
+  handles.reserve(ctxs_.size());
+  for (auto& ctx : ctxs_) {
+    handles.push_back(ctx->register_mr_dmabuf(addr, length, fd, fd_offset));
+  }
+  return handles;
+}
+
 void TransferEngine::deregister_mr(uint64_t addr) {
   for (auto& ctx : ctxs_) ctx->deregister_mr(addr);
 }

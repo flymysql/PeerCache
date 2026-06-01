@@ -161,6 +161,25 @@ peercache-bench drive --discovery-addr PRODUCER_IP:31998 \
 [`docs/assets/perf/make_charts.py`](https://github.com/flymysql/PeerCache/blob/main/docs/assets/perf/make_charts.py)
 生成;刷新基线时更新里面的数据点即可。
 
+## GPUDirect RDMA(读进 GPU 显存)
+
+真实 SGLang 部署里 KV 缓冲区在 **GPU 显存**。PeerCache 可以注册该缓冲区,让单边 READ
+**直接落进显存**(无需经过主机内存中转):
+
+- 若缓冲区暴露 **dmabuf fd**,通过 `ibv_reg_dmabuf_mr` 注册;
+- 否则注册设备虚拟地址(普通 MR),在加载了 **`nvidia-peermem`**(peer memory)时可用。
+
+主机前置条件:支持 GPUDirect 的网卡 + 驱动(ConnectX + MOFED,并加载 `nvidia-peermem`
+或具备 dmabuf 能力的栈)。用下面命令测量:
+
+```bash
+peercache-bench drive --discovery-addr PRODUCER_IP:31998 --device-name mlx5_bond_1 \
+    --layout mla --page-size 131072 --working-set 4096 \
+    --batch-size 32 --concurrencies 4 --duration 10 --warmup 2 --op get --gpu
+```
+
+`--gpu` 把读目的地分配在 GPU 显存;注册失败会抛出明确指出缺失前置条件的错误。
+
 ## 注意
 
 1. **1 MiB 页是合成值**。真实 MLA KV 页通常约 128 KiB;1 MiB 的跑分展示的是*大传输时的

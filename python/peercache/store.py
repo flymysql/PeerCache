@@ -203,14 +203,46 @@ class PeerCacheStore(HiCacheStorage):
     # ------------------------------------------------------------------ #
     # Registration
     # ------------------------------------------------------------------ #
+    def _register_buffer(self, addr: int, length: int, buf=None):
+        """Register a buffer for RDMA, using the dmabuf path for GPU memory when
+        the buffer exposes a dmabuf fd, else a plain MR (host, or GPU memory when
+        nvidia-peermem is loaded)."""
+        transport = self.runtime.transport
+        fd = None
+        offset = 0
+        if buf is not None:
+            getfd = getattr(buf, "dmabuf_fd", None)
+            if callable(getfd):
+                try:
+                    fd = int(getfd())
+                    off = getattr(buf, "dmabuf_offset", None)
+                    offset = int(off()) if callable(off) else 0
+                except Exception:
+                    fd = None
+        try:
+            if fd is not None and fd >= 0 and hasattr(transport, "register_mr_dmabuf"):
+                return transport.register_mr_dmabuf(addr, length, fd, offset)
+            return transport.register_mr(addr, length)
+        except Exception as e:
+            raise RuntimeError(
+                f"peercache: failed to register a {length}-byte buffer for RDMA "
+                f"({e}). For GPU buffers (GPUDirect) ensure the NIC/driver support "
+                f"peer memory (nvidia-peermem loaded, or a dmabuf-capable stack)."
+            ) from e
+
     def register_mem_pool_host(self, mem_pool_host):
         self.mem_pool_host = mem_pool_host
 
-        # 1) Receive MR: SGLang's host KV buffer is the destination of READs.
+        # 1) Receive MR: SGLang's KV buffer is the destination of READs. It may
+        #    live in GPU memory (GPUDirect RDMA): if the buffer exposes a dmabuf
+        #    fd we register via ibv_reg_dmabuf_mr; otherwise a plain ibv_reg_mr
+        #    of the (device) virtual address, which works when nvidia-peermem is
+        #    loaded. A registration failure here usually means GPUDirect isn't
+        #    available on the host.
         kv = mem_pool_host.kv_buffer
         kv_ptr = kv.data_ptr()
         kv_bytes = kv.numel() * kv.element_size()
-        self._recv_mr = self.runtime.transport.register_mr(kv_ptr, kv_bytes)
+        self._recv_mr = self._register_buffer(kv_ptr, kv_bytes, kv)
 
         # 2) Published-pool MR: backend-owned source of remote READs (per-TP slice).
         capacity = max(1, self.config.global_segment_size // self.tp_size)
