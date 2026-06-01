@@ -169,7 +169,7 @@ On 2× AMD EPYC 9K84 + 8× ConnectX-7 (RoCEv2, MTU 4096, MLNX_OFED 5.8):
 |---|---|
 | single NIC, PeerCache | **46.0 GB/s** (368 Gbps) — **~94%** of bare `ib_read_bw` (49.0 GB/s) |
 | single process, 8 rails (1 MiB pages) | **147.6 GB/s** (1.18 Tbps) |
-| full machine, 8 NICs, multi-process | **273.0 GB/s** (≈ 2.18 Tbps) |
+| full machine, 8 NICs, multi-process | **413.1 GB/s** (≈ 3.3 Tbps) |
 
 ![PeerCache GET throughput: single NIC → whole machine](docs/assets/perf/scaling_ladder.png)
 

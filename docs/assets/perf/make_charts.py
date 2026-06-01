@@ -21,27 +21,23 @@ plt.rcParams.update({"font.size": 11, "figure.autolayout": True})
 
 def scaling_ladder():
     labels = [
-        "Bare ib_read_bw\n1 NIC",
         "PeerCache GET\n1 NIC (8 proc)",
         "PeerCache GET\n1 process, 8 rails\n(1 MiB pages)",
-        "PeerCache GET\n8 NICs, multi-process\n(1 MiB pages)",
+        "PeerCache GET\n8 NICs, multi-process\n(128 KiB pages, 8 proc/NIC)",
     ]
-    vals = [49.0, 46.0, 147.6, 273.0]
-    colors = [GREY, PRIMARY, PRIMARY, ACCENT]
-    fig, ax = plt.subplots(figsize=(8, 4.2))
+    vals = [46.0, 147.6, 413.1]
+    colors = [PRIMARY, PRIMARY, ACCENT]
+    fig, ax = plt.subplots(figsize=(8, 4.0))
     bars = ax.barh(range(len(labels)), vals, color=colors)
     ax.set_yticks(range(len(labels)))
     ax.set_yticklabels(labels)
     ax.invert_yaxis()
     ax.set_xlabel("GET throughput (GB/s, 10⁹ bytes/s)")
-    ax.set_title("Throughput scaling ladder (cross-host RDMA, MLA)", pad=14)
-    ax.axvline(392.0, ls="--", color="#bdbdbd")
-    ax.text(388.0, len(labels) - 0.5, "8-NIC bare ceiling ≈ 392 GB/s",
-            color="#757575", ha="right", va="bottom", fontsize=9, rotation=90)
+    ax.set_title("Throughput scaling ladder (cross-host RDMA, MLA)", pad=12)
     for b, v in zip(bars, vals):
-        ax.text(b.get_width() + 4, b.get_y() + b.get_height() / 2,
+        ax.text(b.get_width() + 5, b.get_y() + b.get_height() / 2,
                 f"{v:.1f}", va="center", fontsize=10)
-    ax.set_xlim(0, 410)
+    ax.set_xlim(0, 460)
     fig.savefig(os.path.join(OUT, "scaling_ladder.png"), dpi=140)
     plt.close(fig)
 
@@ -69,16 +65,17 @@ def single_process_scaling():
 
 def per_card():
     cards = [f"bond_{i}" for i in range(1, 9)]
-    vals = [50.139, 35.187, 16.862, 17.202, 36.914, 38.946, 37.227, 40.561]
+    vals = [49.294, 54.537, 25.365, 25.145, 51.369, 89.426, 66.599, 51.398]
+    avg = sum(vals) / len(vals)
     fig, ax = plt.subplots(figsize=(8, 4.2))
     bars = ax.bar(cards, vals, color=PRIMARY)
-    ax.axhline(49.0, ls="--", color=GREY)
-    ax.text(7.4, 49.0 + 0.6, "single-NIC ceiling 49", color="#757575", ha="right", fontsize=9)
+    ax.axhline(avg, ls="--", color=GREY)
+    ax.text(-0.45, avg + 1.2, f"avg {avg:.1f}", color="#757575", ha="left", fontsize=9)
     for b, v in zip(bars, vals):
-        ax.text(b.get_x() + b.get_width() / 2, v + 0.6, f"{v:.1f}", ha="center", fontsize=9)
+        ax.text(b.get_x() + b.get_width() / 2, v + 1.2, f"{v:.1f}", ha="center", fontsize=9)
     ax.set_ylabel("GET throughput (GB/s)")
-    ax.set_title("Per-NIC throughput, 8-NIC multi-process run (Σ = 273.0 GB/s ≈ 2.18 Tbps)")
-    ax.set_ylim(0, 56)
+    ax.set_title("Per-NIC throughput, 8-NIC multi-process run (Σ = 413.1 GB/s ≈ 3.3 Tbps)")
+    ax.set_ylim(0, 100)
     fig.savefig(os.path.join(OUT, "per_card.png"), dpi=140)
     plt.close(fig)
 
