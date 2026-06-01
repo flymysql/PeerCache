@@ -33,6 +33,18 @@ flowchart LR
 | 协调 | master 分配 / 跟踪对象 | 仅服务发现，内嵌于某个节点 |
 | 传输 | RDMA 零拷贝 | RDMA 零拷贝（单边 READ） |
 
+## 性能速览
+
+跨机 RDMA 实测（GET，MLA；2× AMD EPYC 9K84 + 8× ConnectX-7，RoCEv2，MTU 4096）：
+
+| 场景 | GET 吞吐 |
+|---|---|
+| 单卡，PeerCache | **46.0 GB/s** —— 裸 `ib_read_bw`（49.0 GB/s）的 **~94%** |
+| 单进程，8 rail（1 MiB 页） | **147.6 GB/s**（1.18 Tbps） |
+| 整机，8 卡，多进程 | **273.0 GB/s**（≈ 2.18 Tbps） |
+
+图表、方法论与复现命令见 [性能基线](performance.md)。
+
 ## 核心理念
 
 - **内嵌服务发现，无独立 meta 节点** —— 在所有节点上把 `discovery_addr` 配置为
