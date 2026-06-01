@@ -194,6 +194,12 @@ class PeerCacheStore(HiCacheStorage):
         )
         self.runtime.control_rpc.register("data_promote", self._on_data_promote)
 
+        # Re-shard the directory when ring membership changes: the consistent-hash
+        # owner of a key can move when a node joins/leaves, and entries are not
+        # migrated automatically, so each producer re-publishes the locations of
+        # the pages it owns onto the (new) owners. Runs off the discovery thread.
+        self.runtime.add_member_listener(self._on_membership_change)
+
     # ------------------------------------------------------------------ #
     # Registration
     # ------------------------------------------------------------------ #
@@ -348,6 +354,46 @@ class PeerCacheStore(HiCacheStorage):
             except Exception:
                 pass
         return out
+
+    def _on_membership_change(self, members) -> None:
+        """Dispatch a directory re-shard off the discovery/heartbeat thread."""
+        if self._pool is None:
+            return
+        try:
+            self._prefetch.submit(self._republish_directory)
+        except Exception:
+            pass
+
+    def _republish_directory(self) -> None:
+        """Re-PUT this node's directory entries so they land on the current
+        owners after a membership change (resident pages from the pool, plus
+        disk-only pages as non-resident). Best-effort and idempotent."""
+        if self._pool is None:
+            return
+        endpoint = self.runtime.local_rdma_endpoint
+        entries: Dict[str, DataLocation] = {}
+        for key, addr, length in self._pool.snapshot():
+            entries[key] = self._resident_location(addr, length)
+        if self._disk is not None:
+            with self._key_len_lock:
+                disk_only = {k: l for k, l in self._key_len.items() if k not in entries}
+            for key, length in disk_only.items():
+                entries[key] = DataLocation(
+                    node_id=self.config.node_id, rdma_endpoint=endpoint,
+                    remote_addr=0, rkey=0, length=length, resident=False,
+                )
+        if not entries:
+            return
+        keys = list(entries.keys())
+        for lo in range(0, len(keys), 512):
+            chunk = {k: entries[k] for k in keys[lo:lo + 512]}
+            try:
+                self.runtime.directory.put(chunk)
+            except Exception:
+                pass
+        self._metrics.inc("directory_republishes")
+        logger.info("peercache: re-published %d directory entries after a "
+                    "membership change", len(entries))
 
     def _on_data_promote(self, args: dict) -> dict:
         """RPC handler: a remote reader asks us to promote disk-resident keys."""

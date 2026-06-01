@@ -20,6 +20,14 @@ All notable changes to PeerCache are documented here. The format is based on
 ### Changed
 - Node shutdown is now idempotent and deregisters from discovery before tearing
   down the RPC/RDMA endpoints, so peers drop a cleanly-stopped node faster.
+- **Directory survives membership changes.** When the ring changes (a node joins
+  or leaves) the consistent-hash owner of a key can move, and entries are not
+  migrated automatically. Each producer now **re-publishes the locations of the
+  pages it owns** onto the new owners on every membership change (off the
+  discovery thread), so a node that joins after a publish still finds every key.
+  Directory replication now defaults to **2** (`directory_replicas`) so a single
+  node loss doesn't drop entries before the re-shard completes. New
+  `directory_republishes` metric.
 
 ### Added
 - **Performance baseline docs page** (EN/中文) with charts: single-NIC PeerCache
