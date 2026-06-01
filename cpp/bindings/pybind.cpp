@@ -79,7 +79,8 @@ PYBIND11_MODULE(_peercache, m) {
            py::arg("lengths"), py::arg("rail_endpoints"), py::arg("rail_rkeys"),
            py::call_guard<py::gil_scoped_release>())
       .def("local_endpoint", &TransferEngine::local_endpoint)
-      .def("local_endpoints", &TransferEngine::local_endpoints);
+      .def("local_endpoints", &TransferEngine::local_endpoints)
+      .def("stats", &TransferEngine::stats);
 }
 
 #endif

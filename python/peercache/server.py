@@ -129,6 +129,11 @@ class NodeRuntime:
         self.discovery.start()
 
     def stop(self) -> None:
+        # Idempotent. Deregister from discovery FIRST so peers drop us from the
+        # ring (stop routing here) before we tear down the RPC/RDMA endpoints.
+        if getattr(self, "_stopped", False):
+            return
+        self._stopped = True
         self.discovery.stop()
         self._rpc.stop()
         self.transport.close()

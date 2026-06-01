@@ -82,6 +82,10 @@ class Transport:
     def n_rails(self) -> int:
         return 1
 
+    def stats(self) -> dict:
+        """Cumulative data-plane counters (read_timeouts, channel_discards, rails)."""
+        return {"read_timeouts": 0, "channel_discards": 0, "rails": self.n_rails()}
+
     def local_endpoints(self) -> List[str]:
         return [self.local_endpoint()]
 
@@ -172,6 +176,9 @@ class RdmaTransport(Transport):
         return list(self._engine.batch_read_multi(
             node_ids, local_addrs, remote_addrs, lengths,
             rail_endpoints, rail_rkeys))
+
+    def stats(self) -> dict:
+        return dict(self._engine.stats())
 
     def local_endpoint(self) -> str:
         return self._engine.local_endpoint()
