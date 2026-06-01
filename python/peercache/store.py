@@ -35,13 +35,15 @@ from peercache.types import DataLocation
 logger = logging.getLogger(__name__)
 
 # SGLang is optional at import time so the package can be tested standalone.
+# Import the *base class* on its own and as robustly as possible: SGLang's
+# dynamic backend loader rejects a store that doesn't `issubclass(HiCacheStorage)`,
+# so PeerCacheStore must inherit the REAL class whenever SGLang is importable.
+# The other names (HiCacheStorageConfig / HiCacheStorageExtraInfo / PoolName) are
+# optional and vary across SGLang versions, so they are imported separately with
+# graceful fallbacks -- a missing optional name must NOT drop us to the stand-in
+# base class (which previously broke the subclass check on newer SGLang).
 try:
-    from sglang.srt.mem_cache.hicache_storage import (  # type: ignore
-        HiCacheStorage,
-        HiCacheStorageConfig,
-        HiCacheStorageExtraInfo,
-        PoolName,
-    )
+    from sglang.srt.mem_cache.hicache_storage import HiCacheStorage  # type: ignore
 
     _HAS_SGLANG = True
 except Exception:  # pragma: no cover - standalone / test path
@@ -56,9 +58,20 @@ except Exception:  # pragma: no cover - standalone / test path
                 self.registered_pools = {}
             self.registered_pools[host_pool_name] = host_pool
 
+
+try:
+    from sglang.srt.mem_cache.hicache_storage import HiCacheStorageConfig  # type: ignore
+except Exception:
     HiCacheStorageConfig = Any  # type: ignore
+
+try:
+    from sglang.srt.mem_cache.hicache_storage import HiCacheStorageExtraInfo  # type: ignore
+except Exception:
     HiCacheStorageExtraInfo = Any  # type: ignore
 
+try:
+    from sglang.srt.mem_cache.hicache_storage import PoolName  # type: ignore
+except Exception:
     class PoolName(str):  # type: ignore
         KV = "kv"
 
