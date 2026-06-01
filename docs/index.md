@@ -44,6 +44,8 @@ MTU 4096):
 | single process, 8 rails (1 MiB pages) | **147.6 GB/s** (1.18 Tbps) |
 | full machine, 8 NICs, multi-process | **273.0 GB/s** (≈ 2.18 Tbps) |
 
+![PeerCache GET throughput: single NIC → whole machine](assets/perf/scaling_ladder.png)
+
 See the [Performance baseline](performance.md) for charts, methodology, and
 reproduce commands.
 
