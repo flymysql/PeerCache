@@ -48,6 +48,10 @@ in the `discovery_addr` node — no separate meta process.
 | coordination | master allocates / tracks objects | only service discovery, embedded in a node |
 | transfer | RDMA zero-copy | RDMA zero-copy (one-sided READ) |
 
+PeerCache is a **decentralized prefix/KV-reuse cache** — not a PD transfer
+engine. See [Positioning & comparison](positioning.md) for where it fits, the
+trade-offs vs. centralized stores, and when to prefer something else.
+
 ## Performance at a glance
 
 Measured cross-host on RDMA (GET, MLA; 2× AMD EPYC 9K84 + 8× ConnectX-7, RoCEv2,
