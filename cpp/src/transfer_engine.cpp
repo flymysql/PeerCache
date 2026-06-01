@@ -56,6 +56,17 @@ std::vector<MrHandle> TransferEngine::register_mr(uint64_t addr,
   return handles;
 }
 
+std::vector<MrHandle> TransferEngine::register_mr_dmabuf(uint64_t addr,
+                                                         uint64_t length, int fd,
+                                                         uint64_t fd_offset) {
+  std::vector<MrHandle> handles;
+  handles.reserve(ctxs_.size());
+  for (auto& ctx : ctxs_) {
+    handles.push_back(ctx->register_mr_dmabuf(addr, length, fd, fd_offset));
+  }
+  return handles;
+}
+
 void TransferEngine::deregister_mr(uint64_t addr) {
   for (auto& ctx : ctxs_) ctx->deregister_mr(addr);
 }
@@ -94,6 +105,8 @@ std::vector<bool> TransferEngine::batch_read_v(
     if (drained) {
       conn->release(kv.first, ep);
     } else {
+      read_timeouts_.fetch_add(1, std::memory_order_relaxed);
+      channel_discards_.fetch_add(1, std::memory_order_relaxed);
       conn->discard(kv.first, ep);
     }
   }
@@ -199,10 +212,20 @@ std::vector<bool> TransferEngine::batch_read_multi(
     if (drained) {
       conn->release(L.endpoint, L.ep);
     } else {
+      read_timeouts_.fetch_add(1, std::memory_order_relaxed);
+      channel_discards_.fetch_add(1, std::memory_order_relaxed);
       conn->discard(L.endpoint, L.ep);
     }
   }
   return ok;
+}
+
+std::map<std::string, uint64_t> TransferEngine::stats() const {
+  return {
+      {"read_timeouts", read_timeouts_.load(std::memory_order_relaxed)},
+      {"channel_discards", channel_discards_.load(std::memory_order_relaxed)},
+      {"rails", static_cast<uint64_t>(ctxs_.size())},
+  };
 }
 
 std::string TransferEngine::local_endpoint() const {

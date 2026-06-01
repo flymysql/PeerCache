@@ -194,17 +194,55 @@ class PeerCacheStore(HiCacheStorage):
         )
         self.runtime.control_rpc.register("data_promote", self._on_data_promote)
 
+        # Re-shard the directory when ring membership changes: the consistent-hash
+        # owner of a key can move when a node joins/leaves, and entries are not
+        # migrated automatically, so each producer re-publishes the locations of
+        # the pages it owns onto the (new) owners. Runs off the discovery thread.
+        self.runtime.add_member_listener(self._on_membership_change)
+
     # ------------------------------------------------------------------ #
     # Registration
     # ------------------------------------------------------------------ #
+    def _register_buffer(self, addr: int, length: int, buf=None):
+        """Register a buffer for RDMA, using the dmabuf path for GPU memory when
+        the buffer exposes a dmabuf fd, else a plain MR (host, or GPU memory when
+        nvidia-peermem is loaded)."""
+        transport = self.runtime.transport
+        fd = None
+        offset = 0
+        if buf is not None:
+            getfd = getattr(buf, "dmabuf_fd", None)
+            if callable(getfd):
+                try:
+                    fd = int(getfd())
+                    off = getattr(buf, "dmabuf_offset", None)
+                    offset = int(off()) if callable(off) else 0
+                except Exception:
+                    fd = None
+        try:
+            if fd is not None and fd >= 0 and hasattr(transport, "register_mr_dmabuf"):
+                return transport.register_mr_dmabuf(addr, length, fd, offset)
+            return transport.register_mr(addr, length)
+        except Exception as e:
+            raise RuntimeError(
+                f"peercache: failed to register a {length}-byte buffer for RDMA "
+                f"({e}). For GPU buffers (GPUDirect) ensure the NIC/driver support "
+                f"peer memory (nvidia-peermem loaded, or a dmabuf-capable stack)."
+            ) from e
+
     def register_mem_pool_host(self, mem_pool_host):
         self.mem_pool_host = mem_pool_host
 
-        # 1) Receive MR: SGLang's host KV buffer is the destination of READs.
+        # 1) Receive MR: SGLang's KV buffer is the destination of READs. It may
+        #    live in GPU memory (GPUDirect RDMA): if the buffer exposes a dmabuf
+        #    fd we register via ibv_reg_dmabuf_mr; otherwise a plain ibv_reg_mr
+        #    of the (device) virtual address, which works when nvidia-peermem is
+        #    loaded. A registration failure here usually means GPUDirect isn't
+        #    available on the host.
         kv = mem_pool_host.kv_buffer
         kv_ptr = kv.data_ptr()
         kv_bytes = kv.numel() * kv.element_size()
-        self._recv_mr = self.runtime.transport.register_mr(kv_ptr, kv_bytes)
+        self._recv_mr = self._register_buffer(kv_ptr, kv_bytes, kv)
 
         # 2) Published-pool MR: backend-owned source of remote READs (per-TP slice).
         capacity = max(1, self.config.global_segment_size // self.tp_size)
@@ -299,6 +337,16 @@ class PeerCacheStore(HiCacheStorage):
         m.set_gauge_provider("disk_capacity_bytes", lambda: self.config.disk_size if self._disk else 0)
         m.set_gauge_provider("disk_keys", lambda: self._disk.stats()[1] if self._disk else 0)
         m.set_gauge_provider("members", lambda: len(self.runtime.discovery.members()))
+        # Data-plane (transport) gauges: rails (NICs) and cumulative timeouts /
+        # channel discards surfaced from the C++ engine (0 on the TCP fallback).
+        def _tstat(key):
+            try:
+                return self.runtime.transport.stats().get(key, 0)
+            except Exception:
+                return 0
+        m.set_gauge_provider("rdma_rails", lambda: _tstat("rails"))
+        m.set_gauge_provider("rdma_read_timeouts", lambda: _tstat("read_timeouts"))
+        m.set_gauge_provider("rdma_channel_discards", lambda: _tstat("channel_discards"))
 
     # ------------------------------------------------------------------ #
     # Disk promote: load a key from disk back into the pool (makes it readable)
@@ -338,6 +386,46 @@ class PeerCacheStore(HiCacheStorage):
             except Exception:
                 pass
         return out
+
+    def _on_membership_change(self, members) -> None:
+        """Dispatch a directory re-shard off the discovery/heartbeat thread."""
+        if self._pool is None:
+            return
+        try:
+            self._prefetch.submit(self._republish_directory)
+        except Exception:
+            pass
+
+    def _republish_directory(self) -> None:
+        """Re-PUT this node's directory entries so they land on the current
+        owners after a membership change (resident pages from the pool, plus
+        disk-only pages as non-resident). Best-effort and idempotent."""
+        if self._pool is None:
+            return
+        endpoint = self.runtime.local_rdma_endpoint
+        entries: Dict[str, DataLocation] = {}
+        for key, addr, length in self._pool.snapshot():
+            entries[key] = self._resident_location(addr, length)
+        if self._disk is not None:
+            with self._key_len_lock:
+                disk_only = {k: l for k, l in self._key_len.items() if k not in entries}
+            for key, length in disk_only.items():
+                entries[key] = DataLocation(
+                    node_id=self.config.node_id, rdma_endpoint=endpoint,
+                    remote_addr=0, rkey=0, length=length, resident=False,
+                )
+        if not entries:
+            return
+        keys = list(entries.keys())
+        for lo in range(0, len(keys), 512):
+            chunk = {k: entries[k] for k in keys[lo:lo + 512]}
+            try:
+                self.runtime.directory.put(chunk)
+            except Exception:
+                pass
+        self._metrics.inc("directory_republishes")
+        logger.info("peercache: re-published %d directory entries after a "
+                    "membership change", len(entries))
 
     def _on_data_promote(self, args: dict) -> dict:
         """RPC handler: a remote reader asks us to promote disk-resident keys."""
@@ -539,11 +627,18 @@ class PeerCacheStore(HiCacheStorage):
         if op_index:
             oks = self.runtime.transport.batch_read_multi(
                 r_nodes, r_local, r_remote, r_len, rail_eps, rail_rks)
+            failed = 0
             for j, ok in enumerate(oks):
                 idx = op_index[j]
                 results[idx] = bool(ok)
                 if ok:
                     sources[idx] = "disk" if idx in promoted else "remote"
+                else:
+                    failed += 1
+            # A resident location was found but the RDMA READ failed (timeout /
+            # fabric error) -- distinct from a directory miss.
+            if failed:
+                self._metrics.inc("read_failures", failed)
 
         latency = time.perf_counter() - t0
         for i in range(len(comp_keys)):
@@ -724,6 +819,10 @@ class PeerCacheStore(HiCacheStorage):
             self._key_len.clear()
 
     def close(self) -> None:
+        # Idempotent: safe to call from both an explicit shutdown and atexit.
+        if getattr(self, "_closed", False):
+            return
+        self._closed = True
         try:
             self._prefetch.shutdown(wait=False)
         except Exception:

@@ -26,6 +26,11 @@ class RdmaContext {
 
   // Register a host buffer; returns its lkey/rkey/addr. Thread-safe.
   MrHandle register_mr(uint64_t addr, uint64_t length);
+  // Register a dmabuf-backed region (e.g. GPU memory for GPUDirect RDMA).
+  // `fd` is the dmabuf file descriptor, `fd_offset` the offset within it, and
+  // `addr` the device virtual address used as the IOVA. Thread-safe.
+  MrHandle register_mr_dmabuf(uint64_t addr, uint64_t length, int fd,
+                              uint64_t fd_offset);
   void deregister_mr(uint64_t addr);
 
   // Find the lkey of the registered MR that covers local_addr; 0 if none.
