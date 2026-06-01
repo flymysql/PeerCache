@@ -76,7 +76,9 @@ def _make_store(args, node_id: str, seg_bytes: int):
         "device_names": getattr(args, "devices", "") or "",
         "node_id": node_id,
         "heartbeat_interval": 0.5,
-        "member_ttl": 30.0,
+        # Prune departed readers quickly so a re-run isn't polluted by a stale
+        # node still owning directory shards.
+        "member_ttl": 5.0,
         "global_segment_size": seg_bytes,
         "metrics_enabled": False,
         "disk_enabled": False,
@@ -148,15 +150,37 @@ def run_serve(args) -> None:
     for i in range(ws):
         pool.fill_slot(i, i)
     keys = [f"{KEY_PREFIX}/{i}" for i in range(ws)]
-    for lo in range(0, ws, 256):
-        chunk = list(range(lo, min(lo + 256, ws)))
-        store.batch_set_v1([keys[i] for i in chunk], chunk)
+
+    def _publish_all():
+        for lo in range(0, ws, 256):
+            chunk = list(range(lo, min(lo + 256, ws)))
+            store.batch_set_v1([keys[i] for i in chunk], chunk)
+
+    def _members():
+        # Key on (node_id, control_endpoint): a re-run reuses the same node_id
+        # but a fresh process (new control port) with an empty directory shard,
+        # so we must re-publish to repopulate that shard.
+        try:
+            return frozenset(
+                (nid, ni.control_endpoint())
+                for nid, ni in store.runtime.discovery.members().items()
+            )
+        except Exception:
+            return frozenset()
+
+    _publish_all()
     print(
         f"[serve] published {ws} pages ({human_bytes(ws * pt)}); "
         f"readers may now run `drive`. Ctrl-C to stop.",
         flush=True,
     )
 
+    # The directory is consistent-hash sharded across the live ring, so when the
+    # membership changes (a reader joins or a departed one is pruned) some keys
+    # change owner. Re-publish on every change to re-shard the directory for the
+    # current members; this makes back-to-back `drive` runs against a long-lived
+    # `serve` work without a restart.
+    last_members = _members()
     stop = {"flag": False}
 
     def _handler(*_a):
@@ -166,6 +190,12 @@ def run_serve(args) -> None:
     signal.signal(signal.SIGTERM, _handler)
     while not stop["flag"]:
         time.sleep(0.5)
+        cur = _members()
+        if cur != last_members:
+            last_members = cur
+            _publish_all()
+            print(f"[serve] membership changed -> re-published for "
+                  f"{len(cur)} node(s).", flush=True)
     print("[serve] shutting down.", flush=True)
     store.close()
 
@@ -294,8 +324,12 @@ def _setup_consumer(args, node_id: str, expect_nodes: int):
     """Bring up a consumer store, join the ring, register a pool, wait for data."""
     pt = _page_total(args.page_size, args.layout)
     consumer_slots = max(_csv_ints(args.concurrencies)) * args.batch_size
-    seg_bytes = args.global_segment_size or int(
-        max(args.working_set, consumer_slots) * pt * 1.3)
+    # The consumer never publishes (it only READs into its recv pool), so its
+    # backend published pool is unused -- size it to the read slots only, NOT to
+    # the working set. Otherwise each reader process would allocate
+    # working_set*page_size bytes of idle host memory, which OOMs at scale with
+    # large pages (e.g. 1 MiB pages x big working set x many processes).
+    seg_bytes = args.global_segment_size or int(max(consumer_slots, 64) * pt * 1.3)
     store = _make_store(args, node_id, seg_bytes)
     print(f"[drive] {node_id} up: rdma={store.runtime.local_rdma_endpoint} "
           f"discovery={args.discovery_addr} op={args.op}", flush=True)
