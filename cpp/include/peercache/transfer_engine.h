@@ -74,6 +74,8 @@ class TransferEngine {
   std::vector<uint16_t> ports_;
   std::atomic<uint64_t> read_timeouts_{0};
   std::atomic<uint64_t> channel_discards_{0};
+  std::atomic<uint64_t> read_wc_errors_{0};  // READs that completed with an error
+  std::atomic<int> last_wc_status_{0};       // ibv_wc_status of the last such error
 };
 
 }  // namespace peercache

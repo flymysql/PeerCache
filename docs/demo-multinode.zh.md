@@ -154,6 +154,7 @@ done
 | `read_remote_hits` | **从其他节点经 RDMA** 命中 | **> 0** ← 跨节点收益 |
 | `bytes_read` | 经 RDMA 拉取的字节 | **> 0** |
 | `rdma_read_timeouts` / `rdma_channel_discards` | 数据面错误 | **0** |
+| `rdma_read_wc_errors` / `rdma_last_wc_status` | 完成但报错的 READ | **0** / **0** |
 
 同样负载再跑第二遍,命中率应更高(前缀已被全集群缓存)。
 
@@ -179,6 +180,7 @@ done
 | `timed out waiting for the producer` / 环 < 4 | 发现不可达——放行节点间 TCP `31998`;确认四台用同一个 `discovery_addr`。 |
 | 加载时 CUDA OOM | GPU 上有残留进程——`pkill -9 -f sglang; nvidia-smi`;或调大 `--tp-size`。 |
 | `rdma_read_timeouts` 在涨 | fabric/GID/回环问题——核对 RoCEv2 GID,用 `ib_read_bw` 验证跨机 RDMA。 |
+| `read_failures` 高、`rdma_read_wc_errors` > 0 | 跨节点 READ 完成但报错。看 `rdma_last_wc_status`:**10**(remote access error)= rkey/MR/越界错;**12/13**(RNR/重试超限)= GID/MTU/路径问题——修 `gid_index`(RoCEv2),用 `ib_read_bw` 验证两节点间 RDMA。具体 `ibv_wc_status_str` 也会打到 server 日志。 |
 
 ## 一图流
 
