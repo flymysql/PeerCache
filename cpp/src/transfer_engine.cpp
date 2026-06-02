@@ -197,12 +197,12 @@ std::vector<bool> TransferEngine::batch_read_multi(
     }
     size_t posted = 0;
     for (size_t idx : g.idxs) {
-      uint32_t lkey = ctx->lkey_for(local_addrs[idx]);
+      // The local READ destination may be a buffer the caller never registered
+      // (e.g. SGLang hands batch_get host pages outside the registered KV
+      // pool). Lazily register + cache it so the READ can be posted; only a
+      // genuine registration failure leaves it unreadable.
+      uint32_t lkey = ctx->lkey_for_ensure(local_addrs[idx], lengths[idx]);
       if (lkey == 0) {
-        // The local READ destination is not inside any registered MR on this
-        // rail -- e.g. SGLang handed batch_get a buffer outside the registered
-        // host KV pool. The READ cannot be posted, so it fails without ever
-        // reaching the wire (no completion, no timeout).
         local_reg_misses_.fetch_add(1, std::memory_order_relaxed);
         continue;
       }
@@ -242,7 +242,10 @@ std::vector<bool> TransferEngine::batch_read_multi(
 }
 
 std::map<std::string, uint64_t> TransferEngine::stats() const {
+  uint64_t lazy_mrs = 0;
+  for (const auto& c : ctxs_) lazy_mrs += c->lazy_mr_count();
   return {
+      {"lazy_local_mrs", lazy_mrs},
       {"read_timeouts", read_timeouts_.load(std::memory_order_relaxed)},
       {"channel_discards", channel_discards_.load(std::memory_order_relaxed)},
       {"read_wc_errors", read_wc_errors_.load(std::memory_order_relaxed)},

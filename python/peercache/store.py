@@ -414,6 +414,9 @@ class PeerCacheStore(HiCacheStorage):
         m.set_gauge_provider("rdma_local_reg_misses", lambda: _tstat("local_reg_misses"))
         m.set_gauge_provider("rdma_post_failures", lambda: _tstat("post_failures"))
         m.set_gauge_provider("rdma_lease_failures", lambda: _tstat("lease_failures"))
+        # MRs lazily registered for unregistered local READ destinations (the
+        # generic batch_get path); converges once SGLang's host pages are seen.
+        m.set_gauge_provider("rdma_lazy_local_mrs", lambda: _tstat("lazy_local_mrs"))
 
     # ------------------------------------------------------------------ #
     # Disk promote: load a key from disk back into the pool (makes it readable)
