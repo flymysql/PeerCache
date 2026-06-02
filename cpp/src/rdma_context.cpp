@@ -1,6 +1,7 @@
 #include "peercache/rdma_context.h"
 
 #include <cstring>
+#include <iterator>
 #include <stdexcept>
 #include <string>
 
@@ -125,6 +126,38 @@ uint32_t RdmaContext::lkey_for(uint64_t local_addr) const {
     return it->second.second->lkey;
   }
   return 0;
+}
+
+uint32_t RdmaContext::lkey_for_ensure(uint64_t local_addr, uint64_t length) {
+  uint32_t lk = lkey_for(local_addr);
+  if (lk) return lk;
+  if (length == 0) return 0;
+  // Register exactly the destination range. SGLang reuses a bounded set of host
+  // page buffers, so the cache converges after the first touch of each page;
+  // ibv_reg_mr pins the underlying pages (LOCAL_WRITE is enough for a READ
+  // destination). Done outside the lock since ibv_reg_mr can be slow.
+  ibv_mr* mr = ibv_reg_mr(pd_, reinterpret_cast<void*>(local_addr),
+                          static_cast<size_t>(length), IBV_ACCESS_LOCAL_WRITE);
+  if (!mr) return 0;
+  std::lock_guard<std::mutex> lock(mu_);
+  // Another thread may have covered this range while we were registering.
+  auto it = mrs_.upper_bound(local_addr);
+  if (it != mrs_.begin()) {
+    auto prev = std::prev(it);
+    if (local_addr >= prev->first &&
+        local_addr + length <= prev->first + prev->second.first) {
+      ibv_dereg_mr(mr);
+      return prev->second.second->lkey;
+    }
+  }
+  mrs_[local_addr] = {length, mr};
+  ++lazy_mrs_;
+  return mr->lkey;
+}
+
+uint64_t RdmaContext::lazy_mr_count() const {
+  std::lock_guard<std::mutex> lk(mu_);
+  return lazy_mrs_;
 }
 
 }  // namespace peercache
