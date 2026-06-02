@@ -70,9 +70,12 @@ reproduce commands.
 
 ## Core ideas
 
-- **Embedded discovery, no separate meta node** — you set `discovery_addr` to one
-  node's IP on every node; that node auto-hosts the discovery service in-process.
-  Nodes register, heartbeat, and pull the live membership list. No data and no
+- **Embedded multi-master discovery, no separate meta node** — every host runs the
+  discovery service in-process; the active masters are the `max_masters` (default 3)
+  lowest-hostname live hosts, so a dead master is replaced automatically and a small
+  cluster has all hosts as masters (no single point of failure). You set
+  `discovery_addr` to one or more bootstrap seeds (`host:port`, comma-separated);
+  nodes register, heartbeat, and pull the live membership list. No data and no
   metadata live there.
 - **Consistent-hash directory (DHT)** — the mapping
   `key -> {data_node, remote_addr, rkey, length}` is sharded across all nodes by

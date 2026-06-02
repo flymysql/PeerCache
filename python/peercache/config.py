@@ -96,6 +96,13 @@ class PeerCacheConfig:
     heartbeat_interval: float = 2.0
     member_ttl: float = 6.0
 
+    # Multi-master discovery: every host runs a discovery server on the meta
+    # port; the active masters are the `max_masters` lowest-hostname live hosts.
+    # A dead master is replaced automatically; a cluster with fewer hosts than
+    # this has all of them as masters. `discovery_addr` may also be a
+    # comma-separated list of bootstrap seeds.
+    max_masters: int = 3
+
     def __post_init__(self):
         if not self.local_hostname:
             self.local_hostname = _resolve_local_ip(self.discovery_addr)
@@ -122,11 +129,20 @@ class PeerCacheConfig:
             raise ValueError(
                 f"peercache: protocol must be 'rdma' or 'tcp', got {self.protocol!r}"
             )
-        if ":" not in self.discovery_addr:
+        seeds = self.discovery_seeds()
+        if not seeds or any(":" not in s for s in seeds):
             raise ValueError(
-                "peercache: discovery_addr must be 'host:port', got "
-                f"{self.discovery_addr!r}"
+                "peercache: discovery_addr must be 'host:port' (or a "
+                f"comma-separated list of them), got {self.discovery_addr!r}"
             )
+        ports = {s.rsplit(":", 1)[1] for s in seeds}
+        if len(ports) > 1:
+            raise ValueError(
+                "peercache: all discovery_addr seeds must share the same meta "
+                f"port (every host listens on it), got ports {sorted(ports)}"
+            )
+        if int(self.max_masters) < 1:
+            raise ValueError(f"peercache: max_masters must be >= 1, got {self.max_masters}")
         if not (1 <= int(self.ib_port) <= 255):
             raise ValueError(f"peercache: ib_port must be 1..255, got {self.ib_port}")
         if int(self.gid_index) < -1:
@@ -156,6 +172,15 @@ class PeerCacheConfig:
     def device_rails(self) -> list:
         """Ordered list of RDMA device names, one per rail (>=1)."""
         return list(getattr(self, "_rails", None) or [self.device_name or ""])
+
+    def discovery_seeds(self) -> list:
+        """Bootstrap seed endpoints parsed from discovery_addr (host:port list)."""
+        return [s.strip() for s in str(self.discovery_addr).split(",") if s.strip()]
+
+    def meta_port(self) -> int:
+        """Cluster-wide discovery/meta port (every host listens on it). Taken
+        from the first seed; all seeds must share the same meta port."""
+        return int(self.discovery_seeds()[0].rsplit(":", 1)[1])
 
     @classmethod
     def from_extra_config(cls, extra: dict) -> "PeerCacheConfig":
@@ -193,6 +218,7 @@ class PeerCacheConfig:
             "node_id",
             "heartbeat_interval",
             "member_ttl",
+            "max_masters",
         }
         kwargs = {k: v for k, v in extra.items() if k in known}
         return cls(**kwargs)
