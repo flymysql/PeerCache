@@ -167,6 +167,7 @@ What "working" looks like:
 | `read_remote_hits` | hits served **from another node over RDMA** | **> 0** ← the cross-node win |
 | `bytes_read` | bytes pulled over RDMA | **> 0** |
 | `rdma_read_timeouts` / `rdma_channel_discards` | data-plane errors | **0** |
+| `rdma_read_wc_errors` / `rdma_last_wc_status` | READs that completed with an error | **0** / **0** |
 
 A second pass of the same workload should show a higher hit rate (the prefixes
 are now cached cluster-wide).
@@ -194,6 +195,8 @@ throughput.
 | `timed out waiting for the producer` / ring < 4 | Discovery unreachable — open TCP `31998` between nodes; ensure all use the same `discovery_addr`. |
 | CUDA OOM at load | Stale process on the GPU — `pkill -9 -f sglang; nvidia-smi`; or raise `--tp-size`. |
 | `rdma_read_timeouts` climbing | Fabric/GID/loopback issue — verify RoCEv2 GID and cross-node RDMA (`ib_read_bw`). |
+| `read_failures` high, `rdma_read_wc_errors` > 0 | Cross-node READs complete with an error. Check `rdma_last_wc_status`: **10** (remote access error) = bad rkey/MR/bounds; **12/13** (RNR/retry-exceeded) = GID/MTU/path — fix `gid_index` (RoCEv2), verify `ib_read_bw` between the two nodes. The exact `ibv_wc_status_str` is also printed to the server log. |
+| `read_failures` high but `rdma_read_wc_errors` = 0 and `rdma_read_timeouts` = 0 | The READ never reached the wire. Check `rdma_local_reg_misses` (local destination outside a registered MR — the read buffer isn't part of the registered host KV pool), `rdma_post_failures`, `rdma_lease_failures`. |
 
 ## Recap
 

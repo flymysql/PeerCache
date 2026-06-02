@@ -191,14 +191,26 @@ std::vector<bool> TransferEngine::batch_read_multi(
     ConnectionManager* conn = conns_[g.rail].get();
     RdmaContext* ctx = ctxs_[g.rail].get();
     RdmaEndpoint* ep = conn->lease(g.endpoint);
-    if (!ep) continue;
+    if (!ep) {
+      lease_failures_.fetch_add(g.idxs.size(), std::memory_order_relaxed);
+      continue;
+    }
     size_t posted = 0;
     for (size_t idx : g.idxs) {
-      uint32_t lkey = ctx->lkey_for(local_addrs[idx]);
-      if (lkey == 0) continue;
+      // The local READ destination may be a buffer the caller never registered
+      // (e.g. SGLang hands batch_get host pages outside the registered KV
+      // pool). Lazily register + cache it so the READ can be posted; only a
+      // genuine registration failure leaves it unreadable.
+      uint32_t lkey = ctx->lkey_for_ensure(local_addrs[idx], lengths[idx]);
+      if (lkey == 0) {
+        local_reg_misses_.fetch_add(1, std::memory_order_relaxed);
+        continue;
+      }
       if (ep->post_read(local_addrs[idx], lkey, remote_addrs[idx], g.rkey,
                         lengths[idx], static_cast<uint64_t>(idx))) {
         ++posted;
+      } else {
+        post_failures_.fetch_add(1, std::memory_order_relaxed);
       }
     }
     leased.push_back({g.rail, g.endpoint, ep, posted});
@@ -208,7 +220,16 @@ std::vector<bool> TransferEngine::batch_read_multi(
   double timeout = op_timeout_s();
   for (auto& L : leased) {
     ConnectionManager* conn = conns_[L.rail].get();
+    uint64_t errs_before = L.ep->wc_errors();
     bool drained = L.ep->drain(L.posted, ok, timeout);
+    uint64_t new_errs = L.ep->wc_errors() - errs_before;
+    if (new_errs) {
+      // READs that completed with an error status (distinct from a timeout):
+      // surface the count and the last status so a bad rkey/MR (remote access
+      // error) or a GID/path issue (retry-exceeded) is diagnosable.
+      read_wc_errors_.fetch_add(new_errs, std::memory_order_relaxed);
+      last_wc_status_.store(L.ep->last_wc_status(), std::memory_order_relaxed);
+    }
     if (drained) {
       conn->release(L.endpoint, L.ep);
     } else {
@@ -221,9 +242,18 @@ std::vector<bool> TransferEngine::batch_read_multi(
 }
 
 std::map<std::string, uint64_t> TransferEngine::stats() const {
+  uint64_t lazy_mrs = 0;
+  for (const auto& c : ctxs_) lazy_mrs += c->lazy_mr_count();
   return {
+      {"lazy_local_mrs", lazy_mrs},
       {"read_timeouts", read_timeouts_.load(std::memory_order_relaxed)},
       {"channel_discards", channel_discards_.load(std::memory_order_relaxed)},
+      {"read_wc_errors", read_wc_errors_.load(std::memory_order_relaxed)},
+      {"last_wc_status",
+       static_cast<uint64_t>(last_wc_status_.load(std::memory_order_relaxed))},
+      {"local_reg_misses", local_reg_misses_.load(std::memory_order_relaxed)},
+      {"post_failures", post_failures_.load(std::memory_order_relaxed)},
+      {"lease_failures", lease_failures_.load(std::memory_order_relaxed)},
       {"rails", static_cast<uint64_t>(ctxs_.size())},
   };
 }

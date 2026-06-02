@@ -46,12 +46,21 @@ class RdmaEndpoint {
 
   bool connected() const { return connected_; }
 
+  // Status (ibv_wc_status) of the most recent *failed* READ completion on this
+  // endpoint, or IBV_WC_SUCCESS (0) if none has failed. Lets the engine surface
+  // why reads fail (e.g. remote access error vs retry-exceeded) instead of
+  // silently dropping the completion status.
+  int last_wc_status() const { return last_wc_status_; }
+  uint64_t wc_errors() const { return wc_errors_; }
+
  private:
   RdmaContext* ctx_;
   ibv_cq* cq_ = nullptr;
   ibv_qp* qp_ = nullptr;
   uint32_t psn_ = 0;
   bool connected_ = false;
+  int last_wc_status_ = 0;     // IBV_WC_SUCCESS
+  uint64_t wc_errors_ = 0;     // count of non-success completions seen
 };
 
 }  // namespace peercache
