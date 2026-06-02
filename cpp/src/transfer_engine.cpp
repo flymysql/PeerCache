@@ -191,14 +191,26 @@ std::vector<bool> TransferEngine::batch_read_multi(
     ConnectionManager* conn = conns_[g.rail].get();
     RdmaContext* ctx = ctxs_[g.rail].get();
     RdmaEndpoint* ep = conn->lease(g.endpoint);
-    if (!ep) continue;
+    if (!ep) {
+      lease_failures_.fetch_add(g.idxs.size(), std::memory_order_relaxed);
+      continue;
+    }
     size_t posted = 0;
     for (size_t idx : g.idxs) {
       uint32_t lkey = ctx->lkey_for(local_addrs[idx]);
-      if (lkey == 0) continue;
+      if (lkey == 0) {
+        // The local READ destination is not inside any registered MR on this
+        // rail -- e.g. SGLang handed batch_get a buffer outside the registered
+        // host KV pool. The READ cannot be posted, so it fails without ever
+        // reaching the wire (no completion, no timeout).
+        local_reg_misses_.fetch_add(1, std::memory_order_relaxed);
+        continue;
+      }
       if (ep->post_read(local_addrs[idx], lkey, remote_addrs[idx], g.rkey,
                         lengths[idx], static_cast<uint64_t>(idx))) {
         ++posted;
+      } else {
+        post_failures_.fetch_add(1, std::memory_order_relaxed);
       }
     }
     leased.push_back({g.rail, g.endpoint, ep, posted});
@@ -236,6 +248,9 @@ std::map<std::string, uint64_t> TransferEngine::stats() const {
       {"read_wc_errors", read_wc_errors_.load(std::memory_order_relaxed)},
       {"last_wc_status",
        static_cast<uint64_t>(last_wc_status_.load(std::memory_order_relaxed))},
+      {"local_reg_misses", local_reg_misses_.load(std::memory_order_relaxed)},
+      {"post_failures", post_failures_.load(std::memory_order_relaxed)},
+      {"lease_failures", lease_failures_.load(std::memory_order_relaxed)},
       {"rails", static_cast<uint64_t>(ctxs_.size())},
   };
 }
