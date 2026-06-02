@@ -16,7 +16,7 @@ import threading
 import time
 from typing import Callable, Dict, List, Optional, Tuple
 
-from peercache.rpc import RpcClient, RpcServer
+from peercache.rpc import RpcClientPool, RpcServer
 from peercache.types import NodeInfo
 
 logger = logging.getLogger(__name__)
@@ -106,7 +106,18 @@ class DiscoveryServer:
 
 
 class DiscoveryClient:
-    """Runs on every node. Registers self, heartbeats, refreshes membership."""
+    """Runs on every node. Registers self, heartbeats, refreshes membership.
+
+    Multi-master: discovery is replicated across the ``max_masters`` lowest
+    (by hostname) live hosts -- every host runs a ``DiscoveryServer`` on the
+    cluster-wide meta port, and the active masters are derived from the live
+    membership, so when a master dies the next host is promoted automatically
+    and a cluster with fewer than ``max_masters`` hosts has all of them as
+    masters. The client registers/heartbeats to all current masters (plus the
+    configured seed addresses, which stay reachable for bootstrapping new
+    nodes) and merges the membership it gets back. The registry is soft state,
+    so a freshly promoted/restarted master repopulates within one heartbeat.
+    """
 
     def __init__(
         self,
@@ -115,9 +126,24 @@ class DiscoveryClient:
         on_members: Optional[Callable[[List[NodeInfo]], None]] = None,
         heartbeat_interval: float = 2.0,
         register_retry_interval: float = 2.0,
+        meta_port: Optional[int] = None,
+        max_masters: int = 3,
     ):
-        self._addr = discovery_addr
-        self._client = RpcClient(discovery_addr)
+        # discovery_addr may be a single "host:port" or a comma-separated list
+        # of bootstrap seeds. The meta port is cluster-wide (every host listens
+        # on it); default it to the first seed's port.
+        self._seeds = [s.strip() for s in str(discovery_addr).split(",") if s.strip()]
+        self._addr = ",".join(self._seeds)
+        # Head(s): the configured bootstrap host(s). The head is pinned as the
+        # primary master (master #1) whenever it is alive, so the cluster always
+        # has a stable, well-known entry point; the remaining master slots are
+        # filled in hostname order by the other live hosts.
+        self._seed_hosts = [s.rsplit(":", 1)[0] for s in self._seeds]
+        if meta_port is None:
+            meta_port = int(self._seeds[0].rsplit(":", 1)[1])
+        self._meta_port = int(meta_port)
+        self._max_masters = max(1, int(max_masters))
+        self._pool = RpcClientPool()
         self._self = self_info
         self._on_members = on_members
         self._interval = heartbeat_interval
@@ -153,6 +179,33 @@ class DiscoveryClient:
             info = self._members.get(node_id)
             return info.control_endpoint() if info else None
 
+    def master_hosts(self) -> List[str]:
+        """The hosts currently acting as discovery masters (diagnostics)."""
+        with self._lock:
+            members = list(self._members.values())
+        return self._masters_from(members)
+
+    def _masters_from(self, members: List[NodeInfo]) -> List[str]:
+        """Current master hosts: the configured head(s) pinned first (while
+        alive), then the remaining live hosts in hostname order, capped at
+        max_masters. So a single configured head is always master #1 and the
+        next joiners are promoted in order to fill up to max_masters; if the
+        head is down, live hosts still fill all the slots."""
+        member_hosts = sorted({m.control_host for m in members})
+        heads = [h for h in self._seed_hosts if h in member_hosts]
+        others = [h for h in member_hosts if h not in heads]
+        return (heads + others)[: self._max_masters]
+
+    def _targets(self) -> List[str]:
+        """Endpoints to register/heartbeat to: the derived masters plus the
+        configured seeds (kept reachable so new nodes can always bootstrap)."""
+        with self._lock:
+            members = list(self._members.values())
+        master_eps = [f"{h}:{self._meta_port}" for h in self._masters_from(members)]
+        # Seeds first so a cold start (no members yet) still has a target;
+        # dedup preserves order.
+        return list(dict.fromkeys(self._seeds + master_eps))
+
     def _apply_members(self, raw_members: List[dict]) -> None:
         members = {m["node_id"]: NodeInfo.from_dict(m) for m in raw_members}
         with self._lock:
@@ -166,19 +219,34 @@ class DiscoveryClient:
                 parts.append(f"joined={sorted(joined)}")
             if left:
                 parts.append(f"left={sorted(left)}")
-            logger.info("discovery: membership changed -> %d node(s) %s; meta=%s; members=%s",
-                        len(new), " ".join(parts), self._addr, sorted(new))
+            logger.info("discovery: membership changed -> %d node(s) %s; masters=%s; members=%s",
+                        len(new), " ".join(parts),
+                        self._masters_from(list(members.values())), sorted(new))
         if self._on_members is not None:
             self._on_members(list(members.values()))
 
+    def _register_one(self, endpoint: str, merged: Dict[str, dict]) -> bool:
+        try:
+            resp = self._pool.call(endpoint, "register", {"node": self._self.to_dict()})
+            for m in resp.get("members", []):
+                merged[m["node_id"]] = m
+            return True
+        except Exception:
+            return False
+
     def register(self) -> None:
-        resp = self._client.call("register", {"node": self._self.to_dict()})
-        self._apply_members(resp.get("members", []))
+        """Register with every current target; merge the membership. Raises only
+        if *no* target was reachable (so _register_blocking keeps polling)."""
+        merged: Dict[str, dict] = {}
+        reached = sum(self._register_one(ep, merged) for ep in self._targets())
+        if reached == 0:
+            raise ConnectionError(f"no discovery master reachable among {self._targets()}")
+        self._apply_members(list(merged.values()))
 
     def _register_blocking(self) -> None:
-        """Poll the meta until registration succeeds (or stop() is called).
+        """Poll the masters until registration succeeds (or stop() is called).
 
-        Never raises on timeout -- a node started before the meta just waits,
+        Never raises on timeout -- a node started before any master just waits,
         logging periodically, instead of crashing the host process."""
         attempt = 0
         t0 = time.time()
@@ -187,23 +255,24 @@ class DiscoveryClient:
             try:
                 self.register()
                 logger.info(
-                    "discovery: node=%s registered with meta %s after %d attempt(s) "
+                    "discovery: node=%s registered with masters %s after %d attempt(s) "
                     "(%.1fs); current members (%d): %s",
-                    self._self.node_id, self._addr, attempt, time.time() - t0,
+                    self._self.node_id, self.master_hosts(), attempt, time.time() - t0,
                     len(self._members), self._member_ids(),
                 )
                 return
             except Exception as e:
                 logger.warning(
-                    "discovery: node=%s waiting for meta %s (attempt %d, %.0fs elapsed): "
-                    "%s; retrying in %.1fs ...",
-                    self._self.node_id, self._addr, attempt, time.time() - t0, e, self._retry,
+                    "discovery: node=%s waiting for a discovery master (seeds=%s) "
+                    "(attempt %d, %.0fs elapsed): %s; retrying in %.1fs ...",
+                    self._self.node_id, self._seeds, attempt, time.time() - t0, e, self._retry,
                 )
                 time.sleep(self._retry)
 
     def start(self) -> None:
-        logger.info("discovery: node=%s starting; meta=%s; control=%s rdma=%s",
-                    self._self.node_id, self._addr,
+        logger.info("discovery: node=%s starting; seeds=%s meta_port=%d max_masters=%d; "
+                    "control=%s rdma=%s",
+                    self._self.node_id, self._seeds, self._meta_port, self._max_masters,
                     self._self.control_endpoint(), self._self.rdma_endpoint())
         self._running = True
         self._register_blocking()
@@ -212,46 +281,51 @@ class DiscoveryClient:
 
     def stop(self) -> None:
         self._running = False
-        try:
-            self._client.call("deregister", {"node_id": self._self.node_id})
-            logger.info("discovery: node=%s deregistered from meta %s", self._self.node_id, self._addr)
-        except Exception:
-            pass
-        self._client.close()
+        for ep in self._targets():
+            try:
+                self._pool.call(ep, "deregister", {"node_id": self._self.node_id})
+            except Exception:
+                pass
+        logger.info("discovery: node=%s deregistered from masters %s",
+                    self._self.node_id, self.master_hosts())
+        self._pool.close()
 
     def _loop(self) -> None:
         while self._running:
             time.sleep(self._interval)
-            try:
-                resp = self._client.call("heartbeat", {"node_id": self._self.node_id})
-                known = bool(resp.get("known", False))
-                self._beats += 1
-                now = time.time()
-                members = len(self._members)
-                # Throttle the per-beat line to once per _log_interval, but
-                # always surface a change in membership or a lost registration.
-                if (now - self._last_log >= self._log_interval
-                        or members != self._last_log_members or not known):
-                    logger.info(
-                        "discovery: heartbeat #%d node=%s -> meta %s (known=%s, members=%d)",
-                        self._beats, self._self.node_id, self._addr, known, members)
-                    self._last_log = now
-                    self._last_log_members = members
-                else:
-                    logger.debug(
-                        "discovery: heartbeat #%d node=%s -> meta %s (known=%s, members=%d)",
-                        self._beats, self._self.node_id, self._addr, known, members)
-                if not known:
-                    # Meta restarted or evicted us; re-register.
-                    logger.info("discovery: node=%s not known by meta %s -> re-registering",
-                                self._self.node_id, self._addr)
-                    self.register()
+            merged: Dict[str, dict] = {}
+            reached = 0
+            for ep in self._targets():
+                try:
+                    hb = self._pool.call(ep, "heartbeat", {"node_id": self._self.node_id})
+                    reached += 1
+                    if hb.get("known", False):
+                        mem = self._pool.call(ep, "members")
+                        for m in mem.get("members", []):
+                            merged[m["node_id"]] = m
+                    else:
+                        # This master restarted or was freshly promoted and does
+                        # not know us yet -> (re-)register to it.
+                        self._register_one(ep, merged)
+                except Exception:
                     continue
-                resp = self._client.call("members")
-                self._apply_members(resp.get("members", []))
-            except Exception as e:
-                # Meta transiently unreachable; keep last-known membership.
-                logger.warning("discovery: node=%s heartbeat to meta %s failed: %s "
-                               "(keeping last-known %d member(s))",
-                               self._self.node_id, self._addr, e, len(self._members))
+            self._beats += 1
+            now = time.time()
+            if reached == 0:
+                # All masters transiently unreachable; keep last-known membership.
+                logger.warning("discovery: node=%s reached no discovery master "
+                               "(targets=%s); keeping last-known %d member(s)",
+                               self._self.node_id, self._targets(), len(self._members))
                 continue
+            if merged:
+                self._apply_members(list(merged.values()))
+            members = len(self._members)
+            if (now - self._last_log >= self._log_interval
+                    or members != self._last_log_members):
+                logger.info(
+                    "discovery: heartbeat #%d node=%s -> %d/%d master(s) reachable "
+                    "(members=%d, masters=%s)",
+                    self._beats, self._self.node_id, reached, len(self._targets()),
+                    members, self.master_hosts())
+                self._last_log = now
+                self._last_log_members = members
