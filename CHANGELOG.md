@@ -6,6 +6,18 @@ All notable changes to PeerCache are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-06-02
+
+### Fixed
+- **PeerCache did nothing under SGLang versions that register the KV pool via
+  `register_mem_host_pool_v2` (the v2 path).** That handler never created the
+  backend published pool, never registered the recv MR, and never set
+  `mem_pool_host`, so the store had no pool to publish into — every counter
+  stayed 0 and `pool_capacity_bytes` was 0 even with `--hicache-write-policy
+  write_through`. Registration is now shared between the v1 and v2 paths via
+  `_ensure_published_pool()` / `_register_recv()`, so PeerCache publishes
+  correctly regardless of which registration SGLang uses.
+
 ### Added
 - **"Multi-node Demo" docs page** (EN/中文): a step-by-step walkthrough that
   brings up 4 aggregated (non-PD) SGLang nodes sharing one prefix/KV cache via
@@ -251,6 +263,7 @@ Initial release.
   lightweight TCP RPC.
 - MkDocs SDK documentation site and GitHub Actions for CI, docs, and release.
 
+[0.6.2]: https://github.com/flymysql/PeerCache/releases/tag/v0.6.2
 [0.6.1]: https://github.com/flymysql/PeerCache/releases/tag/v0.6.1
 [0.6.0]: https://github.com/flymysql/PeerCache/releases/tag/v0.6.0
 [0.5.1]: https://github.com/flymysql/PeerCache/releases/tag/v0.5.1
