@@ -74,6 +74,50 @@ def cluster():
         a.close(); b.close(); meta.stop()
 
 
+class _FakeTensor:
+    """Host buffer exposing the tensor-like API SGLang hands to batch_set/get."""
+
+    def __init__(self, nbytes, fill=0):
+        self._buf = (ctypes.c_byte * nbytes)()
+        for i in range(nbytes if fill else 0):
+            self._buf[i] = (fill + i) % 251
+        self._n = nbytes
+
+    def data_ptr(self):
+        return ctypes.addressof(self._buf)
+
+    def numel(self):
+        return self._n
+
+    def element_size(self):
+        return 1
+
+    def to_bytes(self):
+        return bytes(self._buf)
+
+
+def test_generic_value_set_get_roundtrip(cluster):
+    # SGLang's generic page backup calls batch_set(hash_values, data) where data
+    # is a list of host KV page tensors (not the zero-copy ptr form). Reading it
+    # back via batch_get(keys, dst_tensors) must fill the destinations.
+    a, b = cluster
+    a.register_mem_host_pool_v2(_MemPoolHost(4096, 8), "kv")
+    b.register_mem_host_pool_v2(_MemPoolHost(4096, 8), "kv")
+    keys = ["g0", "g1", "g2"]
+    vals = [_FakeTensor(4096, fill=i + 1) for i in range(3)]
+    assert a.batch_set(keys, vals) is True          # value form, no target_locations
+    dsts = [_FakeTensor(4096) for _ in range(3)]
+    out = b.batch_get(keys, dsts)                    # fill-target form
+    assert all(o is not None for o in out)
+    for i in range(3):
+        assert dsts[i].to_bytes() == vals[i].to_bytes()
+    # bytes values + single-key set/get also work
+    assert a.batch_set(["gb"], [b"\x01\x02\x03\x04" * 8])
+    d = _FakeTensor(32)
+    assert b.get("gb", target_location=d) is d
+    assert d.to_bytes()[:4] == b"\x01\x02\x03\x04"
+
+
 def test_contract_methods_present():
     # The exact surface SGLang's `dynamic` backend calls.
     for name in (

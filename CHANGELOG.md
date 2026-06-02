@@ -9,14 +9,19 @@ All notable changes to PeerCache are documented here. The format is based on
 ## [0.6.2] - 2026-06-02
 
 ### Fixed
-- **PeerCache did nothing under SGLang versions that register the KV pool via
-  `register_mem_host_pool_v2` (the v2 path).** That handler never created the
-  backend published pool, never registered the recv MR, and never set
-  `mem_pool_host`, so the store had no pool to publish into — every counter
-  stayed 0 and `pool_capacity_bytes` was 0 even with `--hicache-write-policy
-  write_through`. Registration is now shared between the v1 and v2 paths via
-  `_ensure_published_pool()` / `_register_recv()`, so PeerCache publishes
-  correctly regardless of which registration SGLang uses.
+- **Generic value-based `set`/`batch_set`/`get`/`batch_get` now work** — SGLang's
+  HiCache page-backup path calls `batch_set(hash_values, data)` (a list of host
+  KV page tensors) and reads back via `batch_get(keys, dst_tensors)`. PeerCache
+  previously only implemented the zero-copy (`target_location`/`target_sizes`)
+  form and `assert`ed, crashing the controller's backup thread with an
+  `AssertionError`. These methods now accept tensor-like objects (`data_ptr()` /
+  `numel()` / `element_size()`), bytes, numpy arrays, or raw int ptrs, for both
+  the value form and the fill-target form; `batch_get` returns a list aligned
+  with `keys` (the destination on a hit, else `None`).
+- **PeerCache also did nothing under SGLang versions that register the KV pool
+  via `register_mem_host_pool_v2` (the v2 path)** — that handler never created
+  the published pool / recv MR / set `mem_pool_host`. Registration is now shared
+  between the v1 and v2 paths via `_ensure_published_pool()` / `_register_recv()`.
 
 ### Added
 - **"Multi-node Demo" docs page** (EN/中文): a step-by-step walkthrough that

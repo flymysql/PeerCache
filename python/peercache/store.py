@@ -806,28 +806,83 @@ class PeerCacheStore(HiCacheStorage):
         return PoolTransferResult(final_pages, hit_count)
 
     # ------------------------------------------------------------------ #
-    # Abstract single-key / batch (zero-copy ptr+size) API
+    # Abstract single-key / batch API.
+    #
+    # SGLang's HiCache controller drives this in two shapes:
+    #   * zero-copy:    set(key, target_location=ptr, target_sizes=nbytes)
+    #   * value-based:  batch_set(keys, data)  where data is a list of host KV
+    #                   page tensors/bytes (the generic page backup path).
+    # We accept both. `target_locations`/`values` entries may be raw int ptrs,
+    # bytes-like, or objects exposing data_ptr()/numel()/element_size() (tensors).
     # ------------------------------------------------------------------ #
+    @staticmethod
+    def _obj_ptr_size(x, keepalive: list):
+        """(addr, nbytes) for an int ptr, a bytes-like, or a tensor-like object.
+        Bytes-like objects are copied into a ctypes buffer appended to `keepalive`
+        so the address stays valid for the duration of the publish/fetch."""
+        if isinstance(x, int):
+            return x, None
+        dp = getattr(x, "data_ptr", None)
+        if callable(dp):
+            n = getattr(x, "numel", None)
+            es = getattr(x, "element_size", None)
+            nbytes = (n() * es()) if callable(n) and callable(es) else getattr(x, "nbytes", None)
+            return dp(), (int(nbytes) if nbytes is not None else None)
+        if isinstance(x, (bytes, bytearray, memoryview)):
+            b = bytes(x)
+            buf = (ctypes.c_char * len(b)).from_buffer_copy(b)
+            keepalive.append(buf)
+            return ctypes.addressof(buf), len(b)
+        # numpy array
+        if hasattr(x, "ctypes") and hasattr(x, "nbytes"):
+            keepalive.append(x)
+            return x.ctypes.data, int(x.nbytes)
+        raise TypeError(f"peercache: unsupported value/location type {type(x)}")
+
+    def _ptrs_sizes(self, locs, sizes, keepalive: list):
+        ptrs, out_sizes = [], []
+        for i, x in enumerate(locs):
+            p, n = self._obj_ptr_size(x, keepalive)
+            ptrs.append(p)
+            out_sizes.append(int(sizes[i]) if sizes is not None else n)
+        return ptrs, out_sizes
+
     def set(self, key, value=None, target_location=None, target_sizes=None) -> bool:
-        assert target_location is not None and target_sizes is not None
-        return self._publish([key], [target_location], [target_sizes])[0]
+        return self.batch_set(
+            [key], None if value is None else [value],
+            None if target_location is None else [target_location],
+            None if target_sizes is None else [target_sizes],
+        )
 
     def batch_set(self, keys, values=None, target_locations=None, target_sizes=None) -> bool:
-        assert target_locations is not None and target_sizes is not None
-        return all(self._publish(list(keys), list(target_locations), list(target_sizes)))
+        keys = list(keys)
+        keepalive: list = []
+        src = target_locations if target_locations is not None else values
+        if src is None:
+            return False
+        ptrs, sizes = self._ptrs_sizes(list(src), target_sizes, keepalive)
+        res = self._publish(keys, ptrs, sizes)
+        return all(res)
 
     def get(self, key, target_location=None, target_sizes=None):
-        assert target_location is not None and target_sizes is not None
-        ok = self._fetch([key], [target_location], [target_sizes])[0]
-        return target_location if ok else None
+        res = self.batch_get(
+            [key],
+            None if target_location is None else [target_location],
+            None if target_sizes is None else [target_sizes],
+        )
+        return res[0]
 
-    def batch_get(self, keys, target_locations=None, target_sizes=None) -> int:
-        assert target_locations is not None and target_sizes is not None
-        oks = self._fetch(list(keys), list(target_locations), list(target_sizes))
-        for i, ok in enumerate(oks):
-            if not ok:
-                return i
-        return len(keys)
+    def batch_get(self, keys, target_locations=None, target_sizes=None):
+        """Fill the given destinations (host page tensors or ptrs) from the cache.
+        Returns a list aligned with `keys`: the destination on a hit, else None."""
+        keys = list(keys)
+        if target_locations is None:
+            return [None] * len(keys)
+        dsts = list(target_locations)
+        keepalive: list = []
+        ptrs, sizes = self._ptrs_sizes(dsts, target_sizes, keepalive)
+        oks = self._fetch(keys, ptrs, sizes)
+        return [dsts[i] if oks[i] else None for i in range(len(keys))]
 
     def exists(self, key) -> bool:
         return self.runtime.directory.exists([key])[0]
