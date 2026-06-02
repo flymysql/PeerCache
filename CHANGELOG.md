@@ -6,6 +6,23 @@ All notable changes to PeerCache are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-06-02
+
+### Fixed
+- **Generic value-based `set`/`batch_set`/`get`/`batch_get` now work** — SGLang's
+  HiCache page-backup path calls `batch_set(hash_values, data)` (a list of host
+  KV page tensors) and reads back via `batch_get(keys, dst_tensors)`. PeerCache
+  previously only implemented the zero-copy (`target_location`/`target_sizes`)
+  form and `assert`ed, crashing the controller's backup thread with an
+  `AssertionError`. These methods now accept tensor-like objects (`data_ptr()` /
+  `numel()` / `element_size()`), bytes, numpy arrays, or raw int ptrs, for both
+  the value form and the fill-target form; `batch_get` returns a list aligned
+  with `keys` (the destination on a hit, else `None`).
+- **PeerCache also did nothing under SGLang versions that register the KV pool
+  via `register_mem_host_pool_v2` (the v2 path)** — that handler never created
+  the published pool / recv MR / set `mem_pool_host`. Registration is now shared
+  between the v1 and v2 paths via `_ensure_published_pool()` / `_register_recv()`.
+
 ### Added
 - **"Multi-node Demo" docs page** (EN/中文): a step-by-step walkthrough that
   brings up 4 aggregated (non-PD) SGLang nodes sharing one prefix/KV cache via
@@ -251,6 +268,7 @@ Initial release.
   lightweight TCP RPC.
 - MkDocs SDK documentation site and GitHub Actions for CI, docs, and release.
 
+[0.6.2]: https://github.com/flymysql/PeerCache/releases/tag/v0.6.2
 [0.6.1]: https://github.com/flymysql/PeerCache/releases/tag/v0.6.1
 [0.6.0]: https://github.com/flymysql/PeerCache/releases/tag/v0.6.0
 [0.5.1]: https://github.com/flymysql/PeerCache/releases/tag/v0.5.1

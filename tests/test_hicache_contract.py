@@ -74,6 +74,50 @@ def cluster():
         a.close(); b.close(); meta.stop()
 
 
+class _FakeTensor:
+    """Host buffer exposing the tensor-like API SGLang hands to batch_set/get."""
+
+    def __init__(self, nbytes, fill=0):
+        self._buf = (ctypes.c_byte * nbytes)()
+        for i in range(nbytes if fill else 0):
+            self._buf[i] = (fill + i) % 251
+        self._n = nbytes
+
+    def data_ptr(self):
+        return ctypes.addressof(self._buf)
+
+    def numel(self):
+        return self._n
+
+    def element_size(self):
+        return 1
+
+    def to_bytes(self):
+        return bytes(self._buf)
+
+
+def test_generic_value_set_get_roundtrip(cluster):
+    # SGLang's generic page backup calls batch_set(hash_values, data) where data
+    # is a list of host KV page tensors (not the zero-copy ptr form). Reading it
+    # back via batch_get(keys, dst_tensors) must fill the destinations.
+    a, b = cluster
+    a.register_mem_host_pool_v2(_MemPoolHost(4096, 8), "kv")
+    b.register_mem_host_pool_v2(_MemPoolHost(4096, 8), "kv")
+    keys = ["g0", "g1", "g2"]
+    vals = [_FakeTensor(4096, fill=i + 1) for i in range(3)]
+    assert a.batch_set(keys, vals) is True          # value form, no target_locations
+    dsts = [_FakeTensor(4096) for _ in range(3)]
+    out = b.batch_get(keys, dsts)                    # fill-target form
+    assert all(o is not None for o in out)
+    for i in range(3):
+        assert dsts[i].to_bytes() == vals[i].to_bytes()
+    # bytes values + single-key set/get also work
+    assert a.batch_set(["gb"], [b"\x01\x02\x03\x04" * 8])
+    d = _FakeTensor(32)
+    assert b.get("gb", target_location=d) is d
+    assert d.to_bytes()[:4] == b"\x01\x02\x03\x04"
+
+
 def test_contract_methods_present():
     # The exact surface SGLang's `dynamic` backend calls.
     for name in (
@@ -109,6 +153,26 @@ def test_v2_kv_pool_roundtrip(cluster):
     assert all(res["kv"])
     t_get = SimpleNamespace(name="kv", keys=keys, host_indices=list(range(4)))
     res = b.batch_get_v2([t_get])
+    assert all(res["kv"]) and len(res["kv"]) == 4
+
+
+def test_v2_only_registration_creates_pool_and_roundtrips(cluster):
+    # SGLang versions that register the KV pool via register_mem_host_pool_v2
+    # (and never call register_mem_pool_host) must still get a published pool,
+    # otherwise PeerCache can't publish anything (pool_capacity_bytes stays 0).
+    a, b = cluster
+    page, n = 4096, 64
+    pool_a = _MemPoolHost(page, n)
+    pool_b = _MemPoolHost(page, n)
+    a.register_mem_host_pool_v2(pool_a, "kv")
+    b.register_mem_host_pool_v2(pool_b, "kv")
+    # The published pool + mem pool must now exist on the v2 path.
+    assert a._pool is not None and a._pool.capacity > 0
+    assert a.mem_pool_host is pool_a
+    keys = [f"v2only{i}" for i in range(4)]
+    res = a.batch_set_v2([SimpleNamespace(name="kv", keys=keys, host_indices=list(range(4)))])
+    assert all(res["kv"])
+    res = b.batch_get_v2([SimpleNamespace(name="kv", keys=keys, host_indices=list(range(4)))])
     assert all(res["kv"]) and len(res["kv"]) == 4
 
 
