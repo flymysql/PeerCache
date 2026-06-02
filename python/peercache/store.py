@@ -401,6 +401,12 @@ class PeerCacheStore(HiCacheStorage):
         m.set_gauge_provider("rdma_rails", lambda: _tstat("rails"))
         m.set_gauge_provider("rdma_read_timeouts", lambda: _tstat("read_timeouts"))
         m.set_gauge_provider("rdma_channel_discards", lambda: _tstat("channel_discards"))
+        # READs that *completed with an error status* (distinct from a timeout):
+        # e.g. status 10 = remote access error (bad rkey / MR / out-of-bounds),
+        # 13 = retry-exceeded (GID/path/MTU). last_wc_status is the raw
+        # ibv_wc_status of the most recent such failure (0 = none).
+        m.set_gauge_provider("rdma_read_wc_errors", lambda: _tstat("read_wc_errors"))
+        m.set_gauge_provider("rdma_last_wc_status", lambda: _tstat("last_wc_status"))
 
     # ------------------------------------------------------------------ #
     # Disk promote: load a key from disk back into the pool (makes it readable)

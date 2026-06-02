@@ -208,7 +208,16 @@ std::vector<bool> TransferEngine::batch_read_multi(
   double timeout = op_timeout_s();
   for (auto& L : leased) {
     ConnectionManager* conn = conns_[L.rail].get();
+    uint64_t errs_before = L.ep->wc_errors();
     bool drained = L.ep->drain(L.posted, ok, timeout);
+    uint64_t new_errs = L.ep->wc_errors() - errs_before;
+    if (new_errs) {
+      // READs that completed with an error status (distinct from a timeout):
+      // surface the count and the last status so a bad rkey/MR (remote access
+      // error) or a GID/path issue (retry-exceeded) is diagnosable.
+      read_wc_errors_.fetch_add(new_errs, std::memory_order_relaxed);
+      last_wc_status_.store(L.ep->last_wc_status(), std::memory_order_relaxed);
+    }
     if (drained) {
       conn->release(L.endpoint, L.ep);
     } else {
@@ -224,6 +233,9 @@ std::map<std::string, uint64_t> TransferEngine::stats() const {
   return {
       {"read_timeouts", read_timeouts_.load(std::memory_order_relaxed)},
       {"channel_discards", channel_discards_.load(std::memory_order_relaxed)},
+      {"read_wc_errors", read_wc_errors_.load(std::memory_order_relaxed)},
+      {"last_wc_status",
+       static_cast<uint64_t>(last_wc_status_.load(std::memory_order_relaxed))},
       {"rails", static_cast<uint64_t>(ctxs_.size())},
   };
 }
