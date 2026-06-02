@@ -165,6 +165,20 @@ class PeerCacheStore(HiCacheStorage):
         self._dir_cache: Dict[str, tuple] = {}
         self._dir_cache_lock = threading.Lock()
 
+        # One-shot exists->get handoff cache. SGLang's HiCache prefetch resolves
+        # a prefix in two steps: batch_exists() to find the hit length, then
+        # batch_get() to pull those pages -- two directory RPCs for the *same*
+        # keys. batch_exists() primes the resident hit locations here; the
+        # imminent batch_get() consumes (pops) them, skipping the second RPC.
+        # Entries are popped on use and short-TTL, so a consumed location is only
+        # ever as stale as the exists->get gap (sub-millisecond in practice) --
+        # unlike directory_read_cache_ttl this is always on and never serves a
+        # location older than one prefetch handoff.
+        self._primed: Dict[str, tuple] = {}
+        self._primed_lock = threading.Lock()
+        self._primed_ttl = 1.0  # un-consumed primes expire (seconds)
+        self._primed_cap = 1 << 16  # sweep expired entries past this size
+
         # Metrics + monitoring (optional, default on).
         self._metrics = Metrics(node_id=self.config.node_id)
         self._metrics_server: Optional[MetricsServer] = None
@@ -510,17 +524,22 @@ class PeerCacheStore(HiCacheStorage):
 
     def batch_exists(self, keys, extra_info=None) -> int:
         comp_keys, mult = self._component_keys(keys)
-        # The directory retains entries for disk-resident pages (marked
-        # non-resident), so a hit here already covers "in memory OR on disk".
-        ex = self.runtime.directory.exists(comp_keys)
+        # Fetch full locations (not just booleans): a non-None entry means
+        # present (resident in a pool OR spilled to disk -- same semantics as
+        # directory.exists), and resident hits are primed so the imminent
+        # batch_get reuses them instead of issuing a second directory RPC.
+        locs = self._dir_get(comp_keys)
         n = len(comp_keys) // mult
-        for i, present in enumerate(ex):
-            if not present:
+        for i, loc in enumerate(locs):
+            if loc is None:
                 n = i // mult
                 break
+        hit = n * mult
+        if hit:
+            self._prime(comp_keys[:hit], locs[:hit])
         if n and self._disk is not None:
             # Warm the hit prefix back into the pool for the imminent get.
-            self._prefetch_async(comp_keys[: n * mult])
+            self._prefetch_async(comp_keys[:hit])
         return n
 
     # ------------------------------------------------------------------ #
@@ -613,9 +632,46 @@ class PeerCacheStore(HiCacheStorage):
             for k in keys:
                 self._dir_cache.pop(k, None)
 
+    def _prime(self, comp_keys: List[str], locs: List[Optional[DataLocation]]) -> None:
+        """Stash resident locations resolved by batch_exists so the following
+        batch_get for the same keys can skip a second directory lookup."""
+        now = time.monotonic()
+        exp = now + self._primed_ttl
+        with self._primed_lock:
+            if len(self._primed) > self._primed_cap:
+                self._primed = {k: v for k, v in self._primed.items() if v[1] > now}
+            for k, loc in zip(comp_keys, locs):
+                if loc is not None and loc.resident:
+                    self._primed[k] = (loc, exp)
+
+    def _take_primed(self, comp_keys: List[str]) -> List[Optional[DataLocation]]:
+        """Resolve fetch locations, consuming any primed by a preceding
+        batch_exists (one-shot). Falls back to the directory for the rest."""
+        out: List[Optional[DataLocation]] = [None] * len(comp_keys)
+        miss_keys: List[str] = []
+        miss_idx: List[int] = []
+        now = time.monotonic()
+        saved = 0
+        with self._primed_lock:
+            for i, k in enumerate(comp_keys):
+                ent = self._primed.pop(k, None)
+                if ent is not None and ent[1] > now:
+                    out[i] = ent[0]
+                    saved += 1
+                else:
+                    miss_keys.append(k)
+                    miss_idx.append(i)
+        if saved:
+            self._metrics.inc("directory_lookups_saved", saved)
+        if miss_keys:
+            fresh = self._dir_get(miss_keys)
+            for j, loc in enumerate(fresh):
+                out[miss_idx[j]] = loc
+        return out
+
     def _fetch(self, comp_keys: List[str], ptrs: List[int], sizes: List[int]) -> List[bool]:
         t0 = time.perf_counter()
-        locations = self._dir_get(comp_keys)
+        locations = self._take_primed(comp_keys)
         results = [False] * len(comp_keys)
         sources: List[Optional[str]] = [None] * len(comp_keys)
 
@@ -781,7 +837,9 @@ class PeerCacheStore(HiCacheStorage):
             if final_pages == 0:
                 break
             comp_keys, mult = self._v2_component_keys(transfer)
-            ex = self.runtime.directory.exists(comp_keys)
+            locs = self._dir_get(comp_keys)
+            self._prime(comp_keys, locs)
+            ex = [loc is not None for loc in locs]
             page_exists = [
                 all(ex[i * mult : (i + 1) * mult]) for i in range(kv_pages)
             ]
@@ -885,7 +943,9 @@ class PeerCacheStore(HiCacheStorage):
         return [dsts[i] if oks[i] else None for i in range(len(keys))]
 
     def exists(self, key) -> bool:
-        return self.runtime.directory.exists([key])[0]
+        locs = self._dir_get([key])
+        self._prime([key], locs)
+        return locs[0] is not None
 
     def clear(self) -> None:
         with self._key_len_lock:

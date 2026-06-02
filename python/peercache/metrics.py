@@ -40,6 +40,7 @@ _COUNTERS = (
     "promotes",
     "read_failures",  # entry found but the RDMA READ itself failed
     "directory_republishes",  # re-shard events after a membership change
+    "directory_lookups_saved",  # 2nd dir RPC skipped via exists->get handoff
 )
 
 _QUANTILES = (0.5, 0.9, 0.99)
