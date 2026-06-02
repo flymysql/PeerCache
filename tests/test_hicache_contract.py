@@ -142,6 +142,30 @@ def test_v1_set_exists_get_roundtrip(cluster):
     assert all(oks) and len(oks) == 8
 
 
+def test_exists_get_handoff_saves_directory_lookup(cluster):
+    # batch_exists() primes the resident hit locations; the following
+    # batch_get() must consume them (skipping a second directory RPC) and the
+    # primes are one-shot, so a later get without a fresh exists re-resolves.
+    a, b = cluster
+    page, n = 4096, 64
+    a.register_mem_pool_host(_MemPoolHost(page, n))
+    b.register_mem_pool_host(_MemPoolHost(page, n))
+    keys = [f"h{i}" for i in range(8)]
+    assert all(a.batch_set_v1(keys, list(range(8))))
+
+    def saved():
+        return b._metrics.snapshot()["counters"]["directory_lookups_saved"]
+
+    base = saved()
+    assert b.batch_exists(keys) == 8
+    assert all(b.batch_get_v1(keys, list(range(8))))
+    assert saved() - base == 8  # the get reused all 8 primed locations
+
+    # No preceding exists -> nothing primed -> directory is queried again.
+    assert all(b.batch_get_v1(keys, list(range(8))))
+    assert saved() - base == 8
+
+
 def test_v2_kv_pool_roundtrip(cluster):
     a, b = cluster
     page, n = 4096, 64
