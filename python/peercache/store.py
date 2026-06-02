@@ -534,6 +534,13 @@ class PeerCacheStore(HiCacheStorage):
             if loc is None:
                 n = i // mult
                 break
+        # Surface that SGLang is probing L3 and how many pages we report present.
+        # exists_requests>0 with read_requests==0 means SGLang found pages but
+        # did not fetch them (local hit / prefetch disabled); exists_requests==0
+        # means the prefetch never reached the storage backend at all.
+        self._metrics.inc("exists_requests")
+        if n:
+            self._metrics.inc("exists_pages_found", n)
         hit = n * mult
         if hit:
             self._prime(comp_keys[:hit], locs[:hit])
