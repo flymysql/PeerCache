@@ -33,6 +33,7 @@ theme:
 nav:
   - Home: index.md
   - Getting Started: getting-started.md
+  - Multi-node Demo: demo-multinode.md
   - Positioning & Comparison: positioning.md
   - Architecture: architecture.md
   - SDK Reference: sdk.md
@@ -72,6 +73,7 @@ plugins:
           nav_translations:
             Home: 首页
             Getting Started: 快速开始
+            Multi-node Demo: 多机示例
             Positioning & Comparison: 定位与对比
             Architecture: 架构
             SDK Reference: SDK 参考

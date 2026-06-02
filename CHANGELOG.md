@@ -7,6 +7,14 @@ All notable changes to PeerCache are documented here. The format is based on
 ## [Unreleased]
 
 ### Added
+- **"Multi-node Demo" docs page** (EN/中文): a step-by-step walkthrough that
+  brings up 4 aggregated (non-PD) SGLang nodes sharing one prefix/KV cache via
+  PeerCache and proves cross-node hits with the metrics (`read_remote_hits`),
+  including the `--hicache-write-policy write_through` / `--hicache-ratio` knobs,
+  a shared-prefix workload, round-robin routing, an A/B benefit check, and a
+  troubleshooting table.
+
+### Added
 - **"Positioning & comparison" docs page** (EN/中文): what PeerCache is (a
   decentralized P2P prefix/KV-reuse cache) and is not (not a PD transfer engine),
   the two orthogonal axes (reuse vs P→D handoff), a comparison vs centralized KV
