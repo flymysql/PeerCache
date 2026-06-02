@@ -113,6 +113,36 @@ def test_multi_master_three_masters_and_failover():
             servers[h].stop()
 
 
+def test_multi_master_head_is_pinned():
+    # The configured head (127.0.0.3) does NOT sort first, but must still be
+    # master #1; the other two slots fill in hostname order (.1, .2).
+    hosts = ["127.0.0.1", "127.0.0.2", "127.0.0.3", "127.0.0.4"]
+    if not _loopback_aliases_usable(hosts):
+        pytest.skip("loopback aliases not bindable on this OS")
+    port = _free_port()
+    head = "127.0.0.3"
+    seeds = f"{head}:{port}"  # single head IP, as in the initial config
+    servers = {h: DiscoveryServer(h, port, member_ttl=3.0) for h in hosts}
+    for s in servers.values():
+        s.start()
+    clients = {
+        h: DiscoveryClient(seeds, _host_info(h), heartbeat_interval=0.2,
+                           register_retry_interval=0.2, max_masters=3)
+        for h in hosts
+    }
+    for c in clients.values():
+        threading.Thread(target=c.start, daemon=True).start()
+    try:
+        c = clients[head]
+        assert _wait(lambda: len(c.members()) == 4)
+        assert _wait(lambda: c.master_hosts() == [head, "127.0.0.1", "127.0.0.2"])
+    finally:
+        for cl in clients.values():
+            cl.stop()
+        for s in servers.values():
+            s.stop()
+
+
 def test_multi_master_small_cluster_all_masters():
     hosts = ["127.0.0.1", "127.0.0.2"]
     if not _loopback_aliases_usable(hosts):
