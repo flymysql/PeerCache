@@ -166,6 +166,27 @@ def test_exists_get_handoff_saves_directory_lookup(cluster):
     assert saved() - base == 8
 
 
+def test_generic_set_then_batch_exists_finds_pages(cluster):
+    # Regression: SGLang's generic backup writes via batch_set (raw keys) while
+    # prefetch probes via batch_exists. batch_exists must look up the SAME (raw)
+    # keyspace -- otherwise it misses every page (exists_pages_found stays 0)
+    # even though data is being written, and SGLang never issues a get.
+    a, b = cluster
+    a.register_mem_host_pool_v2(_MemPoolHost(4096, 8), "kv")
+    b.register_mem_host_pool_v2(_MemPoolHost(4096, 8), "kv")
+    keys = [f"gx{i}" for i in range(5)]
+    vals = [_FakeTensor(4096, fill=i + 1) for i in range(5)]
+    assert a.batch_set(keys, vals) is True
+    # b never wrote, so it must self-detect the producer's raw keyspace.
+    assert b.batch_exists(keys) == 5
+    assert b._metrics.snapshot()["counters"]["exists_pages_found"] >= 5
+    dsts = [_FakeTensor(4096) for _ in range(5)]
+    out = b.batch_get(keys, dsts)
+    assert all(o is not None for o in out)
+    for i in range(5):
+        assert dsts[i].to_bytes() == vals[i].to_bytes()
+
+
 def test_v2_kv_pool_roundtrip(cluster):
     a, b = cluster
     page, n = 4096, 64

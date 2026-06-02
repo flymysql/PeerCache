@@ -179,6 +179,16 @@ class PeerCacheStore(HiCacheStorage):
         self._primed_ttl = 1.0  # un-consumed primes expire (seconds)
         self._primed_cap = 1 << 16  # sweep expired entries past this size
 
+        # Storage keyspace. The zero-copy v1/v2 paths split each page into
+        # suffixed K/V component keys; the generic value/pointer batch_set/
+        # batch_get store one blob per *raw* key. batch_exists()/exists() must
+        # probe whichever namespace the producer actually wrote, otherwise the
+        # lookup always misses (exists_pages_found stays 0 while data is being
+        # written). The generic set/get path flips this to raw; a read-only node
+        # self-heals by probing the other namespace once on a full miss.
+        self._raw_keys = False
+        self._keyspace_detected = False
+
         # Metrics + monitoring (optional, default on).
         self._metrics = Metrics(node_id=self.config.node_id)
         self._metrics_server: Optional[MetricsServer] = None
@@ -505,6 +515,22 @@ class PeerCacheStore(HiCacheStorage):
             for i in range(0, len(comp_results), multiplier)
         ]
 
+    def _lookup_keys(self, keys):
+        """(component_keys, multiplier) for the active storage keyspace: raw
+        keys for the generic value/pointer path, suffixed for zero-copy v1/v2."""
+        if self._raw_keys:
+            return list(keys), 1
+        return self._component_keys(keys)
+
+    @staticmethod
+    def _hit_prefix(locs: List, multiplier: int) -> int:
+        """Number of leading *pages* present (stops at the first missing one)."""
+        n = len(locs) // multiplier
+        for i, loc in enumerate(locs):
+            if loc is None:
+                return i // multiplier
+        return n
+
     # ------------------------------------------------------------------ #
     # v1 zero-copy paths (primary)
     # ------------------------------------------------------------------ #
@@ -523,17 +549,29 @@ class PeerCacheStore(HiCacheStorage):
         return self._page_results(comp_results, mult)
 
     def batch_exists(self, keys, extra_info=None) -> int:
-        comp_keys, mult = self._component_keys(keys)
         # Fetch full locations (not just booleans): a non-None entry means
         # present (resident in a pool OR spilled to disk -- same semantics as
         # directory.exists), and resident hits are primed so the imminent
         # batch_get reuses them instead of issuing a second directory RPC.
+        comp_keys, mult = self._lookup_keys(keys)
         locs = self._dir_get(comp_keys)
-        n = len(comp_keys) // mult
-        for i, loc in enumerate(locs):
-            if loc is None:
-                n = i // mult
-                break
+        n = self._hit_prefix(locs, mult)
+        if n:
+            self._keyspace_detected = True
+        elif not self._keyspace_detected:
+            # A read-only node has not yet observed which keyspace the producer
+            # writes (raw vs suffixed). On a full miss, probe the other namespace
+            # once; if it hits, lock onto it so future lookups match the writer.
+            alt_raw = not self._raw_keys
+            alt_keys, alt_mult = (
+                (list(keys), 1) if alt_raw else self._component_keys(keys)
+            )
+            alt_locs = self._dir_get(alt_keys)
+            alt_n = self._hit_prefix(alt_locs, alt_mult)
+            if alt_n:
+                self._raw_keys = alt_raw
+                self._keyspace_detected = True
+                comp_keys, mult, locs, n = alt_keys, alt_mult, alt_locs, alt_n
         # Surface that SGLang is probing L3 and how many pages we report present.
         # exists_requests>0 with read_requests==0 means SGLang found pages but
         # did not fetch them (local hit / prefetch disabled); exists_requests==0
@@ -921,6 +959,10 @@ class PeerCacheStore(HiCacheStorage):
 
     def batch_set(self, keys, values=None, target_locations=None, target_sizes=None) -> bool:
         keys = list(keys)
+        # The generic value/pointer API stores one blob per raw key (no K/V
+        # split), so exists()/batch_exists() must look up raw keys too.
+        self._raw_keys = True
+        self._keyspace_detected = True
         keepalive: list = []
         src = target_locations if target_locations is not None else values
         if src is None:
@@ -941,6 +983,8 @@ class PeerCacheStore(HiCacheStorage):
         """Fill the given destinations (host page tensors or ptrs) from the cache.
         Returns a list aligned with `keys`: the destination on a hit, else None."""
         keys = list(keys)
+        self._raw_keys = True
+        self._keyspace_detected = True
         if target_locations is None:
             return [None] * len(keys)
         dsts = list(target_locations)
@@ -950,9 +994,7 @@ class PeerCacheStore(HiCacheStorage):
         return [dsts[i] if oks[i] else None for i in range(len(keys))]
 
     def exists(self, key) -> bool:
-        locs = self._dir_get([key])
-        self._prime([key], locs)
-        return locs[0] is not None
+        return self.batch_exists([key]) > 0
 
     def clear(self) -> None:
         with self._key_len_lock:
