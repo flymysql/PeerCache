@@ -127,6 +127,13 @@ class DiscoveryClient:
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self._beats = 0
+        # Heartbeats fire every _interval (drives liveness/TTL), but logging one
+        # line per beat is noisy. Emit an INFO summary at most every
+        # _log_interval seconds (or whenever membership/known state changes);
+        # the in-between beats log at DEBUG.
+        self._log_interval = 10.0
+        self._last_log = 0.0
+        self._last_log_members = -1
 
     def members(self) -> Dict[str, NodeInfo]:
         with self._lock:
@@ -219,9 +226,21 @@ class DiscoveryClient:
                 resp = self._client.call("heartbeat", {"node_id": self._self.node_id})
                 known = bool(resp.get("known", False))
                 self._beats += 1
-                logger.info("discovery: heartbeat #%d node=%s -> meta %s (known=%s, members=%d)",
-                            self._beats, self._self.node_id, self._addr, known,
-                            len(self._members))
+                now = time.time()
+                members = len(self._members)
+                # Throttle the per-beat line to once per _log_interval, but
+                # always surface a change in membership or a lost registration.
+                if (now - self._last_log >= self._log_interval
+                        or members != self._last_log_members or not known):
+                    logger.info(
+                        "discovery: heartbeat #%d node=%s -> meta %s (known=%s, members=%d)",
+                        self._beats, self._self.node_id, self._addr, known, members)
+                    self._last_log = now
+                    self._last_log_members = members
+                else:
+                    logger.debug(
+                        "discovery: heartbeat #%d node=%s -> meta %s (known=%s, members=%d)",
+                        self._beats, self._self.node_id, self._addr, known, members)
                 if not known:
                     # Meta restarted or evicted us; re-register.
                     logger.info("discovery: node=%s not known by meta %s -> re-registering",
