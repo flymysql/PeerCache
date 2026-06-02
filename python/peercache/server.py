@@ -61,38 +61,31 @@ class NodeRuntime:
         self.config = config
         self._member_listeners: List = []
 
-        # Embedded meta: there is no separate meta node. The node whose IP matches
-        # `discovery_addr` automatically hosts the discovery service. Start it
-        # before anything else so this node (and peers) can register against it.
+        # Multi-master embedded discovery: there is no dedicated meta node. EVERY
+        # host runs a DiscoveryServer on the cluster-wide meta port; the active
+        # masters are the `max_masters` lowest-hostname live hosts (derived by
+        # the client), so a dead master is replaced automatically and a small
+        # cluster has all hosts as masters. Start it before anything else so this
+        # node (and peers) can register. If the port is already bound, a
+        # co-located rank on this host already hosts it -> act as client only.
+        seeds = config.discovery_seeds()
+        meta_port = config.meta_port()
         self._meta_server: Optional[DiscoveryServer] = None
-        disc_host, disc_port = config.discovery_addr.rsplit(":", 1)
-        if host_is_self(disc_host, config.local_hostname):
-            # This node is the designated meta. If the port is already bound,
-            # another local node already hosts it (e.g. several SGLang ranks on
-            # one box, or an externally-launched meta) -> just act as a client.
-            try:
-                self._meta_server = DiscoveryServer(
-                    config.meta_bind_host, int(disc_port), member_ttl=config.member_ttl
-                )
-                self._meta_server.start()
-                logger.info(
-                    "This node hosts the embedded PeerCache meta/discovery service "
-                    "on %s:%s (discovery_addr=%s resolves to self)",
-                    config.meta_bind_host,
-                    disc_port,
-                    config.discovery_addr,
-                )
-            except OSError:
-                self._meta_server = None
-                logger.info(
-                    "Embedded meta port %s already bound; another local node hosts "
-                    "the discovery service. Acting as a client.",
-                    disc_port,
-                )
-        else:
+        try:
+            self._meta_server = DiscoveryServer(
+                config.meta_bind_host, meta_port, member_ttl=config.member_ttl
+            )
+            self._meta_server.start()
             logger.info(
-                "Discovery meta runs on %s (this node %s is a client, not the meta).",
-                config.discovery_addr, config.node_id,
+                "This host runs an embedded PeerCache discovery master on %s:%d "
+                "(seeds=%s, max_masters=%d).",
+                config.meta_bind_host, meta_port, seeds, config.max_masters,
+            )
+        except OSError:
+            self._meta_server = None
+            logger.info(
+                "Discovery meta port %d already bound on this host; a co-located "
+                "rank hosts it. Acting as a client.", meta_port,
             )
 
         self.transport: Transport = transport or create_transport(config)
@@ -120,6 +113,8 @@ class NodeRuntime:
             self.info,
             on_members=self._on_members,
             heartbeat_interval=config.heartbeat_interval,
+            meta_port=config.meta_port(),
+            max_masters=config.max_masters,
         )
         self.directory = DirectoryClient(
             self.ring,
