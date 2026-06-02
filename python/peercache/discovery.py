@@ -134,6 +134,11 @@ class DiscoveryClient:
         # on it); default it to the first seed's port.
         self._seeds = [s.strip() for s in str(discovery_addr).split(",") if s.strip()]
         self._addr = ",".join(self._seeds)
+        # Head(s): the configured bootstrap host(s). The head is pinned as the
+        # primary master (master #1) whenever it is alive, so the cluster always
+        # has a stable, well-known entry point; the remaining master slots are
+        # filled in hostname order by the other live hosts.
+        self._seed_hosts = [s.rsplit(":", 1)[0] for s in self._seeds]
         if meta_port is None:
             meta_port = int(self._seeds[0].rsplit(":", 1)[1])
         self._meta_port = int(meta_port)
@@ -181,9 +186,15 @@ class DiscoveryClient:
         return self._masters_from(members)
 
     def _masters_from(self, members: List[NodeInfo]) -> List[str]:
-        """The min(max_masters, #hosts) lowest hostnames among live members."""
-        hosts = sorted({m.control_host for m in members})
-        return hosts[: self._max_masters]
+        """Current master hosts: the configured head(s) pinned first (while
+        alive), then the remaining live hosts in hostname order, capped at
+        max_masters. So a single configured head is always master #1 and the
+        next joiners are promoted in order to fill up to max_masters; if the
+        head is down, live hosts still fill all the slots."""
+        member_hosts = sorted({m.control_host for m in members})
+        heads = [h for h in self._seed_hosts if h in member_hosts]
+        others = [h for h in member_hosts if h not in heads]
+        return (heads + others)[: self._max_masters]
 
     def _targets(self) -> List[str]:
         """Endpoints to register/heartbeat to: the derived masters plus the
