@@ -1,6 +1,7 @@
 #include "peercache/rdma_endpoint.h"
 
 #include <chrono>
+#include <cstdio>
 #include <cstring>
 #include <random>
 #include <stdexcept>
@@ -164,8 +165,23 @@ bool RdmaEndpoint::drain(size_t count, std::vector<bool>& ok, double timeout_s) 
     }
     for (int i = 0; i < n; ++i) {
       ++seen;
-      if (wc[i].status == IBV_WC_SUCCESS && wc[i].wr_id < ok.size()) {
-        ok[static_cast<size_t>(wc[i].wr_id)] = true;
+      if (wc[i].status == IBV_WC_SUCCESS) {
+        if (wc[i].wr_id < ok.size()) ok[static_cast<size_t>(wc[i].wr_id)] = true;
+      } else {
+        // A completion arrived but the READ failed (e.g. remote access error
+        // from a bad rkey/MR, or retry-exceeded from a GID/path issue). Surface
+        // the status so it is diagnosable; rate-limit so a storm of failures
+        // cannot flood the log.
+        last_wc_status_ = wc[i].status;
+        ++wc_errors_;
+        if (wc_errors_ <= 8 || wc_errors_ % 256 == 0) {
+          std::fprintf(stderr,
+                       "peercache: RDMA READ completion failed: %s (status=%d, "
+                       "wr_id=%llu); total wc errors=%llu\n",
+                       ibv_wc_status_str(wc[i].status), wc[i].status,
+                       static_cast<unsigned long long>(wc[i].wr_id),
+                       static_cast<unsigned long long>(wc_errors_));
+        }
       }
     }
   }

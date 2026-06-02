@@ -36,6 +36,16 @@ class RdmaContext {
   // Find the lkey of the registered MR that covers local_addr; 0 if none.
   uint32_t lkey_for(uint64_t local_addr) const;
 
+  // Like lkey_for, but if no MR covers [local_addr, local_addr+length) it
+  // lazily registers that range (LOCAL_WRITE -- it is a READ destination) and
+  // caches the MR. This lets us read into buffers the caller never explicitly
+  // registered (e.g. SGLang hands batch_get host pages outside the registered
+  // KV pool). Returns 0 only if the registration itself fails. Thread-safe.
+  uint32_t lkey_for_ensure(uint64_t local_addr, uint64_t length);
+
+  // Number of MRs lazily registered by lkey_for_ensure (observability).
+  uint64_t lazy_mr_count() const;
+
   ibv_pd* pd() const { return pd_; }
   ibv_context* context() const { return ctx_; }
   uint8_t ib_port() const { return ib_port_; }
@@ -54,6 +64,7 @@ class RdmaContext {
   mutable std::mutex mu_;
   // addr -> (length, ibv_mr*) sorted by addr for range lookup.
   std::map<uint64_t, std::pair<uint64_t, ibv_mr*>> mrs_;
+  uint64_t lazy_mrs_ = 0;  // count of MRs added by lkey_for_ensure
 };
 
 }  // namespace peercache
