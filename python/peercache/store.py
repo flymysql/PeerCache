@@ -243,21 +243,26 @@ class PeerCacheStore(HiCacheStorage):
                 f"peer memory (nvidia-peermem loaded, or a dmabuf-capable stack)."
             ) from e
 
-    def register_mem_pool_host(self, mem_pool_host):
-        self.mem_pool_host = mem_pool_host
+    def _register_recv(self, host_pool) -> None:
+        """Register a host pool's KV buffer as a receive MR (READ destination).
 
-        # 1) Receive MR: SGLang's KV buffer is the destination of READs. It may
-        #    live in GPU memory (GPUDirect RDMA): if the buffer exposes a dmabuf
-        #    fd we register via ibv_reg_dmabuf_mr; otherwise a plain ibv_reg_mr
-        #    of the (device) virtual address, which works when nvidia-peermem is
-        #    loaded. A registration failure here usually means GPUDirect isn't
-        #    available on the host.
-        kv = mem_pool_host.kv_buffer
-        kv_ptr = kv.data_ptr()
+        The buffer may be host or GPU memory (GPUDirect); a registration failure
+        here usually means GPUDirect isn't available on the host."""
+        kv = getattr(host_pool, "kv_buffer", None)
+        if kv is None:
+            return
         kv_bytes = kv.numel() * kv.element_size()
-        self._recv_mr = self._register_buffer(kv_ptr, kv_bytes, kv)
+        self._recv_mr = self._register_buffer(kv.data_ptr(), kv_bytes, kv)
+        logger.info("PeerCacheStore registered recv MR: %d bytes", kv_bytes)
 
-        # 2) Published-pool MR: backend-owned source of remote READs (per-TP slice).
+    def _ensure_published_pool(self) -> None:
+        """Create the backend-owned published pool (source of remote READs) once.
+
+        Shared by the v1 (register_mem_pool_host) and v2 (register_mem_host_pool_v2)
+        registration paths so PeerCache can publish regardless of which one SGLang
+        calls. Idempotent."""
+        if self._pool is not None:
+            return
         capacity = max(1, self.config.global_segment_size // self.tp_size)
         self._pool_keepalive, base_addr = _alloc_host_buffer(capacity)
         pool_mr = self.runtime.transport.register_mr(base_addr, capacity)
@@ -271,19 +276,31 @@ class PeerCacheStore(HiCacheStorage):
         # Endpoints peers use to READ this pool, one per rail (NIC).
         self._rail_endpoints = list(self.runtime.transport.local_endpoints())
         logger.info(
-            "PeerCacheStore registered MRs: recv=%d bytes, pool=%d bytes",
-            kv_bytes,
-            capacity,
+            "PeerCacheStore published pool ready: %d bytes across %d rail(s)",
+            capacity, len(self._rail_endpoints),
         )
 
+    def register_mem_pool_host(self, mem_pool_host):
+        """SGLang v1 registration: one KV host pool."""
+        self.mem_pool_host = mem_pool_host
+        self._register_recv(mem_pool_host)
+        self._ensure_published_pool()
+
     def register_mem_host_pool_v2(self, host_pool, host_pool_name):
+        """SGLang v2 registration: called once per pool (KV + hybrid sidecars).
+
+        Must do everything v1 does for the KV pool -- set mem_pool_host, register
+        the recv MR, and create the published pool -- otherwise PeerCache has no
+        pool to publish into and silently does nothing (pool_capacity_bytes=0)."""
         self.registered_pools[host_pool_name] = host_pool
+        if str(host_pool_name) in (str(PoolName.KV), "kv"):
+            self.mem_pool_host = host_pool
+            self._register_recv(host_pool)
         # Extra (hybrid) pools' buffers must also be RDMA-registered so peers can
         # READ them; they share the same published-pool publish path on write.
         for buf in getattr(host_pool, "get_hybrid_pool_buffer", lambda: [])():
-            self.runtime.transport.register_mr(
-                buf.data_ptr(), buf.numel() * buf.element_size()
-            )
+            self._register_buffer(buf.data_ptr(), buf.numel() * buf.element_size(), buf)
+        self._ensure_published_pool()
 
     def _resident_location(self, remote_addr: int, length: int) -> DataLocation:
         """Build a resident DataLocation carrying all rail endpoints/rkeys so a

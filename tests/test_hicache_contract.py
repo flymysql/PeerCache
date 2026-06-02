@@ -112,6 +112,26 @@ def test_v2_kv_pool_roundtrip(cluster):
     assert all(res["kv"]) and len(res["kv"]) == 4
 
 
+def test_v2_only_registration_creates_pool_and_roundtrips(cluster):
+    # SGLang versions that register the KV pool via register_mem_host_pool_v2
+    # (and never call register_mem_pool_host) must still get a published pool,
+    # otherwise PeerCache can't publish anything (pool_capacity_bytes stays 0).
+    a, b = cluster
+    page, n = 4096, 64
+    pool_a = _MemPoolHost(page, n)
+    pool_b = _MemPoolHost(page, n)
+    a.register_mem_host_pool_v2(pool_a, "kv")
+    b.register_mem_host_pool_v2(pool_b, "kv")
+    # The published pool + mem pool must now exist on the v2 path.
+    assert a._pool is not None and a._pool.capacity > 0
+    assert a.mem_pool_host is pool_a
+    keys = [f"v2only{i}" for i in range(4)]
+    res = a.batch_set_v2([SimpleNamespace(name="kv", keys=keys, host_indices=list(range(4)))])
+    assert all(res["kv"])
+    res = b.batch_get_v2([SimpleNamespace(name="kv", keys=keys, host_indices=list(range(4)))])
+    assert all(res["kv"]) and len(res["kv"]) == 4
+
+
 def test_v2_exists_with_mocked_sglang(cluster, monkeypatch):
     # batch_exists_v2 lazily imports PoolHitPolicy/PoolTransferResult from sglang;
     # inject a minimal fake so the contract (return type) can be exercised.
