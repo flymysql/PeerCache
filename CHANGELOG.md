@@ -6,6 +6,19 @@ All notable changes to PeerCache are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.6.3] - 2026-06-02
+
+### Changed
+- **Discovery registration now polls the meta indefinitely instead of failing on
+  a timeout.** A node started before the meta no longer crashes the host process
+  (`TimeoutError: timed out` out of `register()`); it waits, logging periodically
+  (`waiting for meta … attempt N … retrying`), and proceeds once the meta is up.
+- **Much more discovery logging** for operability: node identity + which node is
+  the meta at startup; the meta logs every register / re-register / deregister /
+  dead-node prune with the current member count and list; each client logs
+  successful registration, every heartbeat (`known=`, member count), and any
+  membership change (joined / left).
+
 ## [0.6.2] - 2026-06-02
 
 ### Fixed
@@ -268,6 +281,7 @@ Initial release.
   lightweight TCP RPC.
 - MkDocs SDK documentation site and GitHub Actions for CI, docs, and release.
 
+[0.6.3]: https://github.com/flymysql/PeerCache/releases/tag/v0.6.3
 [0.6.2]: https://github.com/flymysql/PeerCache/releases/tag/v0.6.2
 [0.6.1]: https://github.com/flymysql/PeerCache/releases/tag/v0.6.1
 [0.6.0]: https://github.com/flymysql/PeerCache/releases/tag/v0.6.0

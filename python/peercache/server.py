@@ -89,6 +89,11 @@ class NodeRuntime:
                     "the discovery service. Acting as a client.",
                     disc_port,
                 )
+        else:
+            logger.info(
+                "Discovery meta runs on %s (this node %s is a client, not the meta).",
+                config.discovery_addr, config.node_id,
+            )
 
         self.transport: Transport = transport or create_transport(config)
 
