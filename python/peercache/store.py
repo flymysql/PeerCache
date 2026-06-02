@@ -407,6 +407,13 @@ class PeerCacheStore(HiCacheStorage):
         # ibv_wc_status of the most recent such failure (0 = none).
         m.set_gauge_provider("rdma_read_wc_errors", lambda: _tstat("read_wc_errors"))
         m.set_gauge_provider("rdma_last_wc_status", lambda: _tstat("last_wc_status"))
+        # READs that never reached the wire: local_reg_misses = the local READ
+        # destination was outside any registered MR (e.g. SGLang handed batch_get
+        # a buffer outside the registered host KV pool); post_failures =
+        # ibv_post_send rejected the WR; lease_failures = no channel to the peer.
+        m.set_gauge_provider("rdma_local_reg_misses", lambda: _tstat("local_reg_misses"))
+        m.set_gauge_provider("rdma_post_failures", lambda: _tstat("post_failures"))
+        m.set_gauge_provider("rdma_lease_failures", lambda: _tstat("lease_failures"))
 
     # ------------------------------------------------------------------ #
     # Disk promote: load a key from disk back into the pool (makes it readable)

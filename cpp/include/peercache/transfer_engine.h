@@ -76,6 +76,9 @@ class TransferEngine {
   std::atomic<uint64_t> channel_discards_{0};
   std::atomic<uint64_t> read_wc_errors_{0};  // READs that completed with an error
   std::atomic<int> last_wc_status_{0};       // ibv_wc_status of the last such error
+  std::atomic<uint64_t> local_reg_misses_{0};  // local dest not in a registered MR
+  std::atomic<uint64_t> post_failures_{0};     // ibv_post_send rejected the WR
+  std::atomic<uint64_t> lease_failures_{0};    // could not lease a channel to peer
 };
 
 }  // namespace peercache

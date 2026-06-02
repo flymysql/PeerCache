@@ -181,6 +181,7 @@ done
 | 加载时 CUDA OOM | GPU 上有残留进程——`pkill -9 -f sglang; nvidia-smi`;或调大 `--tp-size`。 |
 | `rdma_read_timeouts` 在涨 | fabric/GID/回环问题——核对 RoCEv2 GID,用 `ib_read_bw` 验证跨机 RDMA。 |
 | `read_failures` 高、`rdma_read_wc_errors` > 0 | 跨节点 READ 完成但报错。看 `rdma_last_wc_status`:**10**(remote access error)= rkey/MR/越界错;**12/13**(RNR/重试超限)= GID/MTU/路径问题——修 `gid_index`(RoCEv2),用 `ib_read_bw` 验证两节点间 RDMA。具体 `ibv_wc_status_str` 也会打到 server 日志。 |
+| `read_failures` 高,但 `rdma_read_wc_errors` = 0 且 `rdma_read_timeouts` = 0 | READ 根本没上网。看 `rdma_local_reg_misses`(本地目标地址不在已注册 MR 内——读缓冲不属于已注册的 host KV 池)、`rdma_post_failures`、`rdma_lease_failures`。 |
 
 ## 一图流
 

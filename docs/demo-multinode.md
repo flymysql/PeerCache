@@ -196,6 +196,7 @@ throughput.
 | CUDA OOM at load | Stale process on the GPU — `pkill -9 -f sglang; nvidia-smi`; or raise `--tp-size`. |
 | `rdma_read_timeouts` climbing | Fabric/GID/loopback issue — verify RoCEv2 GID and cross-node RDMA (`ib_read_bw`). |
 | `read_failures` high, `rdma_read_wc_errors` > 0 | Cross-node READs complete with an error. Check `rdma_last_wc_status`: **10** (remote access error) = bad rkey/MR/bounds; **12/13** (RNR/retry-exceeded) = GID/MTU/path — fix `gid_index` (RoCEv2), verify `ib_read_bw` between the two nodes. The exact `ibv_wc_status_str` is also printed to the server log. |
+| `read_failures` high but `rdma_read_wc_errors` = 0 and `rdma_read_timeouts` = 0 | The READ never reached the wire. Check `rdma_local_reg_misses` (local destination outside a registered MR — the read buffer isn't part of the registered host KV pool), `rdma_post_failures`, `rdma_lease_failures`. |
 
 ## Recap
 
