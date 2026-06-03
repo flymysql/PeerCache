@@ -29,17 +29,22 @@ PeerCache 必须能被 SGLang 进程导入：
 python -c "import peercache; print(peercache.__version__)"
 ```
 
-## 1. 选定服务发现主机（内嵌 meta）
+## 1. 选定服务发现 head（内嵌多主）
 
-**无需单独启动 meta 进程。** 选定一个节点承担服务发现，并在*每个*节点上把
-`discovery_addr` 配置为该节点的 IP。IP 与 `discovery_addr` 相符的节点会在启动时
-识别到这一点，并在进程内自动承担服务发现；其余节点作为客户端连接到它。
+**无需单独启动 meta 进程，也没有单点故障。** 选定一个节点的 IP 作为引导 **head**，
+并在*每个*节点上把 `discovery_addr` 配置为它。之后服务发现会自动复制:
 
-因此这里唯一的决策是：把哪个节点的 IP 写进 `discovery_addr`。
+- **每个 host** 都在进程内运行服务发现;
+- **head 被钉为首席 master**;随着节点加入,再按主机名顺序提升后续 host,凑满
+  `max_masters`(默认 **3**)个主;
+- 非 head 的 master 挂掉会自动由下一个 host 顶上;节点数不足时全员皆主。注册表是
+  软状态,新晋升/重启的 master 一个心跳周期内自动重新填满。
+
+因此这里唯一的决策是：把哪个节点的 IP 作为 head 写进 `discovery_addr`。也可以填
+逗号分隔的多个 seed(`"ip1:31998,ip2:31998"`),这样即使 head 挂了,全新节点仍能引导。
 
 > 可选：如果你更希望使用一台不承载 SGLang 的专用发现主机，可在该机器上运行
-> `peercache-meta --bind 0.0.0.0:31998` 并把 `discovery_addr` 指向它。内嵌行为不受
-> 影响 —— 谁的 IP 等于 `discovery_addr` 且能成功绑定端口，谁就承担发现服务。
+> `peercache-meta --bind 0.0.0.0:31998` 并把 `discovery_addr` 指向它。
 
 ## 2. 用 PeerCache 后端启动 SGLang
 
@@ -62,9 +67,16 @@ python -m sglang.launch_server \
     "device_name": "mlx5_0",
     "ib_port": 1,
     "gid_index": 3,
-    "global_segment_size": "8gb"
+    "global_segment_size": "8gb",
+    "disk_enabled": true,
+    "disk_path": "/data/peercache/",
+    "disk_size": "100gb"
   }'
 ```
+
+> 磁盘分层(L4)**默认开启**。`disk_path` 必须在每个节点上可写(各自使用一个
+> `node_id` 子目录);建议指向一块大而快的本地盘(NVMe)。设 `"disk_enabled": false`
+> 可只用内存池。每节点总容量 ≈ `global_segment_size`(内存) + `disk_size`(磁盘)。
 
 ## 部署拓扑（PD 分离）
 
@@ -73,7 +85,7 @@ python -m sglang.launch_server \
 ```mermaid
 flowchart LR
     subgraph prefill [Prefill 池]
-      PF0["node-0（发现主机 + 内嵌 meta）"]
+      PF0["node-0（发现 head + master）"]
       PF1[node-1]
     end
     subgraph decode [Decode 池]
@@ -89,7 +101,8 @@ flowchart LR
 - 在每个 prefill 和 decode 节点上运行**相同**的 PeerCache 后端配置，且
   **`discovery_addr` 处处一致**。
 - 为 `discovery_addr` 选定某个节点的 IP（任意可达节点，通常是某个 prefill 节点）。
-  该节点会自动承担内嵌 meta，无需另外启动任何东西。
+  它是被钉住的 head;每个 host 都运行一个发现 master、最多 `max_masters` 个生效,
+  因此没有单点 meta 可丢,无需另外启动任何东西。
 - 按每个节点应常驻多少已发布 KV 来设置 `global_segment_size`（它会按 `tp_size`
   切分）；池越大命中率越高，但锁定的主机内存也越多。
 - 生产用 `protocol: rdma`；`protocol: tcp` 仅用于功能性测试。
@@ -105,7 +118,7 @@ flowchart LR
 | `backend_name` | — | 必须为 `peercache`（dynamic 工厂要求） |
 | `module_path` | — | `peercache.store`（必填） |
 | `class_name` | — | `PeerCacheStore`（必填） |
-| `discovery_addr` | — | 发现主机 `host:port`，**所有节点一致**；IP 相符的节点自动承担 meta（**必填**） |
+| `discovery_addr` | — | 引导 head `host:port`(或逗号分隔的 seed 列表)，**所有节点一致**；head 被钉为首席发现 master,每个 host 都运行一个 master（**必填**） |
 
 RDMA / 传输：
 
@@ -123,7 +136,9 @@ RDMA / 传输：
 |---|---|---|
 | `global_segment_size` | `4gb` | 每节点发布池（内存）大小（接受 `int` 或 `"8gb"`/`"512mb"`；按 `tp_size` 切分） |
 | `vnodes` | `160` | 一致性哈希环上每节点的虚拟节点数 |
-| `directory_replicas` | `1` | `> 1` 时把目录条目复制到 N 个归属者以实现高可用 |
+| `directory_replicas` | `2` | 把目录条目复制到 N 个归属者,使单节点丢失时在重分片完成前不丢条目 |
+| `directory_read_cache_ttl` | `0` | 把已解析的常驻读位置缓存 N 秒,在热点静态工作集上跳过每批目录查询(`0`=关闭;读 miss 时失效) |
+| `max_masters` | `3` | 发现 master 数量;head 加上后续 host(按主机名排序)为主,挂掉自动顶替(小集群则全员皆主) |
 
 磁盘持久化分层（L4）：
 
@@ -146,7 +161,7 @@ RDMA / 传输：
 
 | 键 | 默认值 | 含义 |
 |---|---|---|
-| `meta_bind_host` | `0.0.0.0` | 本节点作为发现主机时，内嵌 meta 绑定的网卡接口 |
+| `meta_bind_host` | `0.0.0.0` | 内嵌发现 master 绑定的网卡接口（每个 host 都在 meta 端口上运行一个） |
 | `local_hostname` | 自动 | 对外公告的 IP；自动解析为能到达 `discovery_addr` 的本机 IP |
 | `rdma_bind_host` | `0.0.0.0` | RDMA 数据面绑定接口 |
 | `rdma_port` | `0` | RDMA 引导端口；`0` 表示自动分配 |
@@ -154,7 +169,7 @@ RDMA / 传输：
 | `control_port` | `0` | 控制 RPC 端口；`0` 表示自动分配 |
 | `node_id` | 自动 | 稳定的节点标识；由 `local_hostname` + 随机后缀自动生成 |
 | `heartbeat_interval` | `2.0` | 成员心跳间隔（秒） |
-| `member_ttl` | `6.0` | meta 将静默节点剔除前的等待秒数 |
+| `member_ttl` | `6.0` | master 将静默节点剔除前的等待秒数 |
 
 ## 持久化与监控
 

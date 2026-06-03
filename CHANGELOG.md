@@ -6,6 +6,94 @@ All notable changes to PeerCache are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-06-02
+
+### Changed
+- Multi-master discovery now **pins the configured head** (the `discovery_addr`
+  host) as the primary master whenever it is alive — a stable, well-known
+  bootstrap anchor — and fills the remaining master slots in hostname order as
+  nodes join. If the head is down, the live hosts still fill all slots.
+
+## [0.7.0] - 2026-06-02
+
+### Added
+- **Multi-master discovery — no single meta SPOF.** Previously one node (the
+  `discovery_addr` host) ran the only discovery server; if it died there were no
+  new joins and no failure detection. Now **every host runs a discovery server**
+  on the cluster-wide meta port and the active masters are the `max_masters`
+  (default 3) lowest-hostname live hosts, derived from membership: a dead master
+  is replaced automatically, and a cluster with fewer than `max_masters` hosts has
+  all of them as masters. The client registers/heartbeats to all current masters
+  plus the configured bootstrap seeds (`discovery_addr` may be a comma-separated
+  list) and merges the membership (union); the soft-state registry repopulates
+  within one heartbeat. New `max_masters` config, `discovery_seeds()` /
+  `meta_port()` helpers, and `DiscoveryClient.master_hosts()`. Backward compatible
+  with a single `discovery_addr`.
+
+## [0.6.9] - 2026-06-02
+
+### Fixed
+- **Cross-node reads driven by SGLang's generic `batch_get` now actually
+  transfer.** The local READ destination SGLang passes can sit outside the
+  registered host KV pool, so `lkey_for(addr)` returned 0 and the work request was
+  silently never posted — `read_failures` climbed with **no** completion error and
+  **no** timeout. `RdmaContext::lkey_for_ensure()` now lazily registers and caches
+  an MR (`LOCAL_WRITE`) for an unregistered destination range so the READ can post;
+  SGLang reuses a bounded set of host pages, so the cache converges after first
+  touch. New `rdma_lazy_local_mrs` gauge.
+
+## [0.6.8] - 2026-06-02
+
+### Added
+- **Pre-wire read-failure counters** to tell "failed on the wire" from "never
+  posted": `rdma_local_reg_misses` (local destination outside any registered MR),
+  `rdma_post_failures` (`ibv_post_send` rejected the WR), and
+  `rdma_lease_failures` (no channel could be leased to the peer).
+
+## [0.6.7] - 2026-06-02
+
+### Added
+- **RDMA READ completion-error visibility.** A cross-node READ can *complete with
+  an error status* rather than time out; `drain()` was silently dropping it.
+  It now records the failing `ibv_wc_status` and logs `ibv_wc_status_str`
+  (rate-limited), surfaced as `rdma_read_wc_errors` / `rdma_last_wc_status` — which
+  distinguishes a remote-access error (bad rkey/MR/bounds, status 10) from
+  retry-exceeded (GID/MTU/path, status 12/13).
+
+## [0.6.6] - 2026-06-02
+
+### Changed
+- Heartbeat logging is throttled to ~10s (a membership-count change or a lost
+  registration still logs immediately; in-between beats drop to DEBUG). The
+  heartbeat cadence itself — which drives liveness/TTL — is unchanged.
+
+## [0.6.5] - 2026-06-02
+
+### Fixed
+- **`batch_exists` probed the wrong keyspace, so reads never fired.** SGLang's
+  generic HiCache path writes one blob per *raw* key via `batch_set`, but
+  `batch_exists` looked keys up as the *suffixed* K/V component keys used by the
+  zero-copy v1/v2 path. The prefetch probe therefore missed every page
+  (`exists_pages_found` stayed 0 while `write_requests` climbed into the
+  thousands) and SGLang never issued a `get`. `batch_exists` / `exists` now
+  resolve keys through the active keyspace (raw for the generic value/pointer
+  path, suffixed for zero-copy), and a read-only node self-heals by probing the
+  other namespace once on a full miss.
+
+## [0.6.4] - 2026-06-02
+
+### Added
+- **`exists` / L3-prefetch observability**: `exists_requests` (how many times
+  SGLang probed the storage backend) and `exists_pages_found` (how many pages were
+  reported present), so a stuck prefetch path is diagnosable end to end.
+
+### Changed
+- **Directory lookup reused across `exists` → `get`.** SGLang's prefetch resolves
+  a prefix with `batch_exists` then `batch_get` — two directory RPCs for the same
+  keys. `batch_exists` now primes the resident hit locations into a one-shot,
+  short-TTL handoff cache that the imminent `batch_get` consumes, skipping the
+  redundant second lookup. New `directory_lookups_saved` counter.
+
 ## [0.6.3] - 2026-06-02
 
 ### Changed
@@ -281,6 +369,14 @@ Initial release.
   lightweight TCP RPC.
 - MkDocs SDK documentation site and GitHub Actions for CI, docs, and release.
 
+[0.7.1]: https://github.com/flymysql/PeerCache/releases/tag/v0.7.1
+[0.7.0]: https://github.com/flymysql/PeerCache/releases/tag/v0.7.0
+[0.6.9]: https://github.com/flymysql/PeerCache/releases/tag/v0.6.9
+[0.6.8]: https://github.com/flymysql/PeerCache/releases/tag/v0.6.8
+[0.6.7]: https://github.com/flymysql/PeerCache/releases/tag/v0.6.7
+[0.6.6]: https://github.com/flymysql/PeerCache/releases/tag/v0.6.6
+[0.6.5]: https://github.com/flymysql/PeerCache/releases/tag/v0.6.5
+[0.6.4]: https://github.com/flymysql/PeerCache/releases/tag/v0.6.4
 [0.6.3]: https://github.com/flymysql/PeerCache/releases/tag/v0.6.3
 [0.6.2]: https://github.com/flymysql/PeerCache/releases/tag/v0.6.2
 [0.6.1]: https://github.com/flymysql/PeerCache/releases/tag/v0.6.1

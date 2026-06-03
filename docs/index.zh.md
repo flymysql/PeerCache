@@ -36,7 +36,8 @@ flowchart LR
 ```
 
 目录分片在**每个**节点上(此例中该 key 归属节点 R 的分片);每个节点也各自托管一个分片。
-服务发现内嵌在 `discovery_addr` 指向的节点上——没有独立的 meta 进程。
+服务发现内嵌且多主——每个 host 都运行,`discovery_addr` head 被钉住、最多 `max_masters`
+(默认 3)个生效——因此没有独立的 meta 进程,也没有单点故障。
 
 ## 为什么选择 PeerCache？
 

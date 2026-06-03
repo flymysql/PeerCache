@@ -31,19 +31,27 @@ PeerCache must be importable from the SGLang process:
 python -c "import peercache; print(peercache.__version__)"
 ```
 
-## 1. Pick the discovery host (embedded meta)
+## 1. Pick the discovery head (embedded multi-master)
 
-There is **no separate meta process to launch**. Choose one node to host service
-discovery and set `discovery_addr` to that node's IP on *every* node. The node
-whose IP matches `discovery_addr` detects this at startup and auto-hosts the
-discovery service in-process; all other nodes connect to it as clients.
+There is **no separate meta process to launch**, and **no single point of
+failure**. Pick one node's IP as the bootstrap **head** and set `discovery_addr`
+to it on *every* node. From there discovery is replicated automatically:
 
-So the only decision here is: which node's IP goes into `discovery_addr`.
+- **Every host** runs the discovery service in-process.
+- The **head is pinned as the primary master**; as nodes join, the next hosts are
+  promoted in hostname order to fill up to `max_masters` (default **3**).
+- A non-head master that dies is replaced automatically; a cluster with fewer than
+  `max_masters` hosts has all of them as masters. The registry is soft state, so a
+  promoted/restarted master repopulates within one heartbeat.
 
-> Optional: if you'd rather run a dedicated discovery host (e.g. a node that does
-> not serve SGLang), start one with `peercache-meta --bind 0.0.0.0:31998` and point
-> `discovery_addr` at it. The embedded behavior is unaffected — whichever node's
-> IP equals `discovery_addr` and is free to bind the port will host it.
+So the only decision here is: which node's IP is the bootstrap head in
+`discovery_addr`. You may also give a comma-separated list of seeds
+(`"ip1:31998,ip2:31998"`) so brand-new nodes can still bootstrap if the head is
+down.
+
+> Optional: to run a dedicated discovery host (e.g. a node that does not serve
+> SGLang), start one with `peercache-meta --bind 0.0.0.0:31998` and point
+> `discovery_addr` at it.
 
 ## 2. Launch SGLang with the PeerCache backend
 
@@ -66,9 +74,17 @@ python -m sglang.launch_server \
     "device_name": "mlx5_0",
     "ib_port": 1,
     "gid_index": 3,
-    "global_segment_size": "8gb"
+    "global_segment_size": "8gb",
+    "disk_enabled": true,
+    "disk_path": "/data/peercache/",
+    "disk_size": "100gb"
   }'
 ```
+
+> The disk tier (L4) is **on by default**. `disk_path` must be writable on every
+> node (each uses a `node_id` subdirectory); point it at a large, fast local disk
+> (NVMe). Set `"disk_enabled": false` to keep everything in the memory pool only.
+> Total capacity per node ≈ `global_segment_size` (RAM) + `disk_size` (disk).
 
 ## Deployment topology (PD disaggregation)
 
@@ -77,7 +93,7 @@ A typical PD-disaggregated cluster:
 ```mermaid
 flowchart LR
     subgraph prefill [Prefill pool]
-      PF0["node-0 (discovery host + embedded meta)"]
+      PF0["node-0 (discovery head + master)"]
       PF1[node-1]
     end
     subgraph decode [Decode pool]
@@ -93,7 +109,9 @@ Rules of thumb:
 - Run the **same** PeerCache backend config on every prefill and decode node, with
   the **same `discovery_addr`** everywhere.
 - Pick one node's IP for `discovery_addr` (any reachable node — often a prefill
-  node). That node auto-hosts the embedded meta; nothing else to launch.
+  node). It is the pinned head; every host runs a discovery master and up to
+  `max_masters` are active, so there is no single meta to lose. Nothing else to
+  launch.
 - Size `global_segment_size` to how much published KV each node should keep
   resident (it is sliced across `tp_size`); larger pool = higher hit rate, more
   host RAM pinned.
@@ -110,7 +128,7 @@ Required keys (the dynamic-backend factory needs the first three):
 | `backend_name` | — | must be `peercache` (required by the dynamic factory) |
 | `module_path` | — | `peercache.store` (required) |
 | `class_name` | — | `PeerCacheStore` (required) |
-| `discovery_addr` | — | discovery host `host:port`, **same on all nodes**; the node whose IP matches auto-hosts meta (**required**) |
+| `discovery_addr` | — | bootstrap head `host:port` (or a comma-separated seed list), **same on all nodes**; the head is pinned as the primary discovery master, every host runs a master (**required**) |
 
 RDMA / transport:
 
@@ -128,7 +146,9 @@ Capacity / placement:
 |---|---|---|
 | `global_segment_size` | `4gb` | published-pool (memory) size per node (accepts `int` or `"8gb"`/`"512mb"`; sliced across `tp_size`) |
 | `vnodes` | `160` | virtual nodes per node on the consistent-hash ring |
-| `directory_replicas` | `1` | replicate directory entries to N owners for HA when `> 1` |
+| `directory_replicas` | `2` | replicate directory entries to N owners so a single node loss doesn't drop entries before the re-shard completes |
+| `directory_read_cache_ttl` | `0` | cache resolved resident read locations for N seconds to skip the per-batch directory lookup on hot, static working sets (`0` = off; invalidated on a read miss) |
+| `max_masters` | `3` | number of discovery masters; the head plus the next hosts (hostname order) are masters, auto-promoted on failure (smaller clusters use all hosts) |
 
 Disk persistence tier (L4):
 
@@ -151,7 +171,7 @@ Networking / identity (rarely need changing):
 
 | key | default | meaning |
 |---|---|---|
-| `meta_bind_host` | `0.0.0.0` | interface the embedded meta binds when this node is the discovery host |
+| `meta_bind_host` | `0.0.0.0` | interface the embedded discovery master binds (every host runs one on the meta port) |
 | `local_hostname` | auto | IP advertised to peers; auto-resolved as the local IP that can reach `discovery_addr` |
 | `rdma_bind_host` | `0.0.0.0` | bind interface for the RDMA data plane |
 | `rdma_port` | `0` | RDMA bootstrap port; `0` = auto-assign |
@@ -159,7 +179,7 @@ Networking / identity (rarely need changing):
 | `control_port` | `0` | control RPC port; `0` = auto-assign |
 | `node_id` | auto | stable node identifier; auto-generated from `local_hostname` + random suffix |
 | `heartbeat_interval` | `2.0` | seconds between membership heartbeats |
-| `member_ttl` | `6.0` | seconds before a silent node is pruned by the meta |
+| `member_ttl` | `6.0` | seconds before a silent node is pruned by a master |
 
 ## Persistence and monitoring
 
