@@ -14,7 +14,7 @@ cross-node cache hits with metrics.
 
 | Role | Host | Notes |
 |---|---|---|
-| Node 1 | `<NODE1_IP>` | also hosts the embedded PeerCache meta **and** the router |
+| Node 1 | `<NODE1_IP>` | the pinned discovery **head** (every host runs a master) **and** the router |
 | Node 2 | `<NODE2_IP>` | |
 | Node 3 | `<NODE3_IP>` | |
 | Node 4 | `<NODE4_IP>` | |
@@ -55,11 +55,11 @@ Set these in each node's shell. **Only `SELF` differs per node.**
 ```bash
 MODEL=/path/to/your/model                 # same path on every node
 DEVS=mlx5_bond_1,mlx5_bond_2,mlx5_bond_3,mlx5_bond_4,mlx5_bond_5,mlx5_bond_6,mlx5_bond_7,mlx5_bond_8
-DISC=<NODE1_IP>:31998                      # SAME on all nodes; Node 1 auto-hosts the meta
+DISC=<NODE1_IP>:31998                      # SAME on all nodes; Node 1 is the pinned discovery head
 SELF=<this node's IP>                      # e.g. <NODE1_IP> on node 1, <NODE2_IP> on node 2 ...
 TP=1                                       # raise if the model needs >1 GPU
 
-PC='{"backend_name":"peercache","module_path":"peercache.store","class_name":"PeerCacheStore","discovery_addr":"'$DISC'","protocol":"rdma","device_names":"'$DEVS'","local_hostname":"'$SELF'","global_segment_size":"16gb"}'
+PC='{"backend_name":"peercache","module_path":"peercache.store","class_name":"PeerCacheStore","discovery_addr":"'$DISC'","protocol":"rdma","device_names":"'$DEVS'","local_hostname":"'$SELF'","global_segment_size":"16gb","disk_path":"/data/peercache/","disk_size":"100gb"}'
 ```
 
 !!! tip "Single NIC?"
@@ -68,7 +68,8 @@ PC='{"backend_name":"peercache","module_path":"peercache.store","class_name":"Pe
 
 ## Step 3 — start one SGLang server per node
 
-Run this on **all four** nodes (start **Node 1 first** — it hosts the meta).
+Run this on **all four** nodes (start **Node 1 first** — it is the discovery head
+that the others bootstrap from).
 
 ```bash
 pkill -9 -f sglang; sleep 2                       # free any stale GPU memory
@@ -95,7 +96,7 @@ Why these flags matter for the demo:
 In each server log you should see PeerCache come up:
 
 ```
-This node hosts the embedded PeerCache meta/discovery service on 0.0.0.0:31998   (Node 1 only)
+This host runs an embedded PeerCache discovery master on 0.0.0.0:31998 (seeds=['<NODE1_IP>:31998'], max_masters=3).   (every node)
 PeerCacheStore up: node=<ip>-xxxx rdma=<ip>:<port> control=<ip>:<port> discovery=<NODE1_IP>:31998
 PeerCacheStore registered MRs: recv=... bytes, pool=17179869184 bytes
 ```

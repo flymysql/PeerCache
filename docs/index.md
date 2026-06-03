@@ -37,7 +37,9 @@ flowchart LR
 
 The directory is sharded across **every** node (here the example key is owned by
 Node R's shard); each node also hosts a shard of its own. Discovery is embedded
-in the `discovery_addr` node — no separate meta process.
+and multi-master — every host runs it, the `discovery_addr` head is pinned, and up
+to `max_masters` (default 3) are active — so there is no separate meta process and
+no single point of failure.
 
 ## Why PeerCache?
 

@@ -47,7 +47,11 @@ cfg = PeerCacheConfig(
     ib_port=1, gid_index=3,
     global_segment_size="8gb",  # accepts int or "4gb"/"512mb"
     vnodes=160,
-    directory_replicas=1,
+    directory_replicas=2,
+    max_masters=3,              # head + up to 2 more hosts act as discovery masters
+    disk_enabled=True,
+    disk_path="/data/peercache/",
+    disk_size="100gb",
 )
 # or from SGLang extra_config:
 cfg = PeerCacheConfig.from_extra_config({"discovery_addr": "10.0.0.1:31998"})

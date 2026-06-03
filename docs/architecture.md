@@ -228,12 +228,15 @@ read concurrency to a single hot peer.
 - **Eviction races**: pool eviction deletes the directory entry; any read that
   resolves a stale/missing entry returns a miss so SGLang recomputes (safe
   degradation).
-- **Embedded meta**: there is no dedicated meta machine. The node whose IP equals
-  `discovery_addr` auto-hosts the discovery service in-process (others connect as
-  clients). It is a single point for *discovery only*. Membership is cached
-  locally, so a brief meta outage does not interrupt established reads/writes. If
-  the discovery host dies, restart it on the same IP — established peers keep
-  serving from their cached membership in the meantime.
-- **Directory durability**: with a single replica, a node failure loses that
-  shard's location records (and the data, which lived on that node anyway) — an
-  acceptable cache miss. Use `directory_replicas > 1` for redundancy.
+- **Embedded multi-master discovery**: there is no dedicated meta machine and no
+  single point of failure. Every host runs a discovery server on the meta port;
+  the active masters are the `max_masters` (default 3) hosts, with the configured
+  `discovery_addr` head pinned first and the rest promoted in hostname order as
+  nodes join. A non-head master that dies is replaced automatically; membership is
+  also cached locally, so a brief master outage never interrupts established
+  reads/writes. If the head itself dies, established peers keep serving via the
+  other masters — restart the head only so brand-new nodes can bootstrap.
+- **Directory durability**: `directory_replicas` defaults to **2**, so a single
+  node loss does not drop a shard's location records before the ring re-shards
+  (each producer re-publishes its pages on a membership change). Worst case a
+  resolve returns a miss and SGLang recomputes — safe degradation.
