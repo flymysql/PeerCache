@@ -59,8 +59,10 @@ Compared with master-coordinated / centralized-metadata KV stores
   metadata throughput grows with the cluster and there is no central hotspot.
 - **Light write path with data locality.** `set()` is a local memcpy plus a tiny
   directory record — no copy into a central pool.
-- **Fewer moving parts to operate.** Discovery is embedded (the `discovery_addr`
-  node auto-hosts it); there is no master to deploy, scale, or keep HA.
+- **Fewer moving parts to operate.** Discovery is embedded and multi-master —
+  every host runs it, with the `discovery_addr` head pinned and up to `max_masters`
+  active — so there is no master to deploy, scale, or keep HA, and no single meta
+  to lose.
 - **Horizontal scaling without a coordinator.** New nodes grow both capacity and
   metadata throughput; membership changes re-shard the directory automatically.
 - **Decentralized failure domain.** Losing a node loses only its shard, not the
