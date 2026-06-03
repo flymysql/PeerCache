@@ -12,7 +12,7 @@
 
 | 角色 | 主机 | 备注 |
 |---|---|---|
-| 节点 1 | `<NODE1_IP>` | 兼内嵌 PeerCache meta **和**路由 |
+| 节点 1 | `<NODE1_IP>` | 被钉住的发现 **head**(每个 host 都运行 master) **和**路由 |
 | 节点 2 | `<NODE2_IP>` | |
 | 节点 3 | `<NODE3_IP>` | |
 | 节点 4 | `<NODE4_IP>` | |
@@ -51,11 +51,11 @@ ulimit -l unlimited                 # 允许 pin RDMA 内存
 ```bash
 MODEL=/path/to/your/model                 # 每台路径相同
 DEVS=mlx5_bond_1,mlx5_bond_2,mlx5_bond_3,mlx5_bond_4,mlx5_bond_5,mlx5_bond_6,mlx5_bond_7,mlx5_bond_8
-DISC=<NODE1_IP>:31998                      # 四台一致;节点 1 自动内嵌 meta
+DISC=<NODE1_IP>:31998                      # 四台一致;节点 1 是被钉住的发现 head
 SELF=<本机 IP>                             # 节点1填 <NODE1_IP>,节点2填 <NODE2_IP> ...
 TP=1                                       # 模型需要多卡就调大
 
-PC='{"backend_name":"peercache","module_path":"peercache.store","class_name":"PeerCacheStore","discovery_addr":"'$DISC'","protocol":"rdma","device_names":"'$DEVS'","local_hostname":"'$SELF'","global_segment_size":"16gb"}'
+PC='{"backend_name":"peercache","module_path":"peercache.store","class_name":"PeerCacheStore","discovery_addr":"'$DISC'","protocol":"rdma","device_names":"'$DEVS'","local_hostname":"'$SELF'","global_segment_size":"16gb","disk_path":"/data/peercache/","disk_size":"100gb"}'
 ```
 
 !!! tip "只有一张卡?"
@@ -64,7 +64,7 @@ PC='{"backend_name":"peercache","module_path":"peercache.store","class_name":"Pe
 
 ## 第 3 步 — 每台起一个 SGLang 服务
 
-**四台都跑**(**先起节点 1**,它托管 meta)。
+**四台都跑**(**先起节点 1**,它是其余节点引导用的发现 head)。
 
 ```bash
 pkill -9 -f sglang; sleep 2                       # 清掉残留 GPU 显存
@@ -89,7 +89,7 @@ CUDA_VISIBLE_DEVICES=0 python -m sglang.launch_server \
 每台服务日志里应看到 PeerCache 起来:
 
 ```
-This node hosts the embedded PeerCache meta/discovery service on 0.0.0.0:31998   (仅节点 1)
+This host runs an embedded PeerCache discovery master on 0.0.0.0:31998 (seeds=['<NODE1_IP>:31998'], max_masters=3).   (每个节点)
 PeerCacheStore up: node=<ip>-xxxx rdma=<ip>:<port> control=<ip>:<port> discovery=<NODE1_IP>:31998
 PeerCacheStore registered MRs: recv=... bytes, pool=17179869184 bytes
 ```
