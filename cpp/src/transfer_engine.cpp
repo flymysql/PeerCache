@@ -241,6 +241,163 @@ std::vector<bool> TransferEngine::batch_read_multi(
   return ok;
 }
 
+std::vector<bool> TransferEngine::batch_write_v(
+    const std::vector<std::string>& remote_nodes,
+    const std::vector<uint64_t>& local_addrs,
+    const std::vector<uint64_t>& remote_addrs,
+    const std::vector<uint32_t>& rkeys,
+    const std::vector<uint64_t>& lengths) {
+  size_t n = lengths.size();
+  std::vector<bool> ok(n, false);
+  if (remote_nodes.size() != n || local_addrs.size() != n ||
+      remote_addrs.size() != n || rkeys.size() != n) {
+    return ok;
+  }
+  RdmaContext* ctx = ctxs_[0].get();
+  ConnectionManager* conn = conns_[0].get();
+
+  std::unordered_map<std::string, std::vector<size_t>> by_peer;
+  for (size_t i = 0; i < n; ++i) by_peer[remote_nodes[i]].push_back(i);
+
+  for (auto& kv : by_peer) {
+    RdmaEndpoint* ep = conn->lease(kv.first);
+    if (!ep) {
+      lease_failures_.fetch_add(kv.second.size(), std::memory_order_relaxed);
+      continue;
+    }
+    size_t posted = 0;
+    for (size_t idx : kv.second) {
+      uint32_t lkey = ctx->lkey_for_ensure(local_addrs[idx], lengths[idx]);
+      if (lkey == 0) {
+        local_reg_misses_.fetch_add(1, std::memory_order_relaxed);
+        continue;
+      }
+      if (ep->post_write(local_addrs[idx], lkey, remote_addrs[idx], rkeys[idx],
+                         lengths[idx], static_cast<uint64_t>(idx))) {
+        ++posted;
+      } else {
+        post_failures_.fetch_add(1, std::memory_order_relaxed);
+      }
+    }
+    uint64_t errs_before = ep->wc_errors();
+    bool drained = ep->drain(posted, ok, op_timeout_s());
+    uint64_t new_errs = ep->wc_errors() - errs_before;
+    if (new_errs) {
+      write_wc_errors_.fetch_add(new_errs, std::memory_order_relaxed);
+      last_write_wc_status_.store(ep->last_wc_status(),
+                                  std::memory_order_relaxed);
+    }
+    if (drained) {
+      conn->release(kv.first, ep);
+    } else {
+      write_timeouts_.fetch_add(1, std::memory_order_relaxed);
+      channel_discards_.fetch_add(1, std::memory_order_relaxed);
+      conn->discard(kv.first, ep);
+    }
+  }
+  return ok;
+}
+
+std::vector<bool> TransferEngine::batch_write_multi(
+    const std::vector<std::string>& node_ids,
+    const std::vector<uint64_t>& local_addrs,
+    const std::vector<uint64_t>& remote_addrs,
+    const std::vector<uint64_t>& lengths,
+    const std::map<std::string, std::vector<std::string>>& rail_endpoints,
+    const std::map<std::string, std::vector<uint32_t>>& rail_rkeys) {
+  size_t n = lengths.size();
+  std::vector<bool> ok(n, false);
+  size_t N = ctxs_.size();
+  if (N == 0 || node_ids.size() != n || local_addrs.size() != n ||
+      remote_addrs.size() != n) {
+    return ok;
+  }
+
+  struct Group {
+    size_t rail;
+    std::string endpoint;
+    uint32_t rkey;
+    std::vector<size_t> idxs;
+  };
+  std::map<std::pair<size_t, std::string>, Group> groups;
+
+  for (size_t i = 0; i < n; ++i) {
+    size_t rail = i % N;
+    auto ep_it = rail_endpoints.find(node_ids[i]);
+    auto rk_it = rail_rkeys.find(node_ids[i]);
+    if (ep_it == rail_endpoints.end() || rk_it == rail_rkeys.end()) continue;
+    const auto& eps = ep_it->second;
+    const auto& rks = rk_it->second;
+    if (rail >= eps.size() || rail >= rks.size()) {
+      rail = 0;
+      if (eps.empty() || rks.empty()) continue;
+    }
+    auto key = std::make_pair(rail, eps[rail]);
+    auto& g = groups[key];
+    if (g.idxs.empty()) {
+      g.rail = rail;
+      g.endpoint = eps[rail];
+      g.rkey = rks[rail];
+    }
+    g.idxs.push_back(i);
+  }
+
+  struct Leased {
+    size_t rail;
+    std::string endpoint;
+    RdmaEndpoint* ep;
+    size_t posted;
+  };
+  std::vector<Leased> leased;
+  leased.reserve(groups.size());
+  for (auto& kv : groups) {
+    Group& g = kv.second;
+    ConnectionManager* conn = conns_[g.rail].get();
+    RdmaContext* ctx = ctxs_[g.rail].get();
+    RdmaEndpoint* ep = conn->lease(g.endpoint);
+    if (!ep) {
+      lease_failures_.fetch_add(g.idxs.size(), std::memory_order_relaxed);
+      continue;
+    }
+    size_t posted = 0;
+    for (size_t idx : g.idxs) {
+      uint32_t lkey = ctx->lkey_for_ensure(local_addrs[idx], lengths[idx]);
+      if (lkey == 0) {
+        local_reg_misses_.fetch_add(1, std::memory_order_relaxed);
+        continue;
+      }
+      if (ep->post_write(local_addrs[idx], lkey, remote_addrs[idx], g.rkey,
+                         lengths[idx], static_cast<uint64_t>(idx))) {
+        ++posted;
+      } else {
+        post_failures_.fetch_add(1, std::memory_order_relaxed);
+      }
+    }
+    leased.push_back({g.rail, g.endpoint, ep, posted});
+  }
+
+  double timeout = op_timeout_s();
+  for (auto& L : leased) {
+    ConnectionManager* conn = conns_[L.rail].get();
+    uint64_t errs_before = L.ep->wc_errors();
+    bool drained = L.ep->drain(L.posted, ok, timeout);
+    uint64_t new_errs = L.ep->wc_errors() - errs_before;
+    if (new_errs) {
+      write_wc_errors_.fetch_add(new_errs, std::memory_order_relaxed);
+      last_write_wc_status_.store(L.ep->last_wc_status(),
+                                  std::memory_order_relaxed);
+    }
+    if (drained) {
+      conn->release(L.endpoint, L.ep);
+    } else {
+      write_timeouts_.fetch_add(1, std::memory_order_relaxed);
+      channel_discards_.fetch_add(1, std::memory_order_relaxed);
+      conn->discard(L.endpoint, L.ep);
+    }
+  }
+  return ok;
+}
+
 std::map<std::string, uint64_t> TransferEngine::stats() const {
   uint64_t lazy_mrs = 0;
   for (const auto& c : ctxs_) lazy_mrs += c->lazy_mr_count();
@@ -251,6 +408,10 @@ std::map<std::string, uint64_t> TransferEngine::stats() const {
       {"read_wc_errors", read_wc_errors_.load(std::memory_order_relaxed)},
       {"last_wc_status",
        static_cast<uint64_t>(last_wc_status_.load(std::memory_order_relaxed))},
+      {"write_wc_errors", write_wc_errors_.load(std::memory_order_relaxed)},
+      {"last_write_wc_status",
+       static_cast<uint64_t>(last_write_wc_status_.load(std::memory_order_relaxed))},
+      {"write_timeouts", write_timeouts_.load(std::memory_order_relaxed)},
       {"local_reg_misses", local_reg_misses_.load(std::memory_order_relaxed)},
       {"post_failures", post_failures_.load(std::memory_order_relaxed)},
       {"lease_failures", lease_failures_.load(std::memory_order_relaxed)},

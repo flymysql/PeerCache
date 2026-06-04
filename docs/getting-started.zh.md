@@ -80,9 +80,9 @@ python -m sglang.launch_server \
 
 ## 3. 中心化模式(可选 — 专用 KV 缓存服务器)
 
-默认 PeerCache 为 **P2P**:每个 SGLang 节点把 KV 发布到本地池,其他节点从生产者
-RDMA 读取。若希望 KV 字节和目录分片由**专用存储节点**托管(类似 Mooncake Store
-布局),推理节点只做客户端,请设置 `"mode": "centralized"`。
+默认 PeerCache 为 **P2P**。专用 **storage server** 可与 P2P 节点**同一集群**
+共存:`mode=hybrid`(P2P+storage)或 `mode=centralized`(推理节点仅作客户端)。
+写入 storage 走 **RDMA WRITE** 零拷贝(TCP 回退时用 RPC 拷贝)。
 
 1. 启动存储服务器(无需 SGLang):
 

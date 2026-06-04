@@ -132,6 +132,30 @@ class PublishedPool:
             self._on_evict(evicted)
         return remote_addr
 
+    def reserve(self, key: str, length: int) -> Optional[int]:
+        """Allocate `length` bytes for `key` without copying source data yet.
+
+        Used by centralized/hybrid storage writes: a remote peer RDMA-Writes into
+        the returned address, then the owner commits the page."""
+        evicted: List[str] = []
+        remote_addr: Optional[int] = None
+        with self._lock:
+            existing = self._entries.get(key)
+            if existing is not None:
+                self._entries.move_to_end(key)
+                return self._base + existing[0]
+            off = self._allocate(length, evicted)
+            if off is None:
+                remote_addr = None
+            else:
+                self._entries[key] = (off, length)
+                self._entries.move_to_end(key)
+                self._used += length
+                remote_addr = self._base + off
+        if evicted and self._on_evict is not None:
+            self._on_evict(evicted)
+        return remote_addr
+
     def snapshot(self) -> List[Tuple[str, int, int]]:
         """Return [(key, remote_addr, length)] for all currently-resident pages.
 

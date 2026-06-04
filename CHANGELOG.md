@@ -6,6 +6,23 @@ All notable changes to PeerCache are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-06-04
+
+### Added
+- **RDMA WRITE zero-copy storage writes** — centralized/hybrid inference nodes
+  reserve slots on storage servers (`data_prepare_writes`), push pages with
+  one-sided RDMA WRITE (`batch_write_multi` in C++), then commit directory
+  entries (`data_commit_writes`). RPC `data_ingest` remains as a fallback.
+- **`mode=hybrid`** — P2P inference nodes and storage servers coexist in one
+  cluster: hybrid nodes RDMA-WRITE to storage for cross-node sharing and keep
+  a local pool copy; pure `p2p` nodes behave as before. Directory lookups use
+  one ring across all nodes.
+
+### Changed
+- Directory is always sharded across **all** live nodes (P2P + storage share one
+  namespace); storage placement uses a separate storage ring.
+- Storage servers no longer require `mode=centralized` on the storage process.
+
 ## [0.8.0] - 2026-06-04
 
 ### Added

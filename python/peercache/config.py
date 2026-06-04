@@ -34,10 +34,11 @@ class PeerCacheConfig:
     # Service discovery (meta node) "host:port".
     discovery_addr: str
 
-    # Deployment mode:
-    #   p2p          - default decentralized model (KV stays on the producer)
-    #   centralized  - dedicated storage nodes hold KV bytes + directory shards;
-    #                  inference nodes are clients (writes via RPC, reads via RDMA)
+    # Deployment mode (per inference node; storage servers use role=storage):
+    #   p2p          - default: KV stays on the producing node (decentralized)
+    #   hybrid       - write to storage servers (RDMA WRITE) when present AND
+    #                    keep a local pool copy; P2P and storage coexist in one cluster
+    #   centralized  - inference nodes are clients; KV only on storage servers
     mode: str = "p2p"
     # Node role (centralized mode only):
     #   auto       - infer from the process (PeerCacheStore -> inference,
@@ -138,6 +139,17 @@ class PeerCacheConfig:
     def is_centralized(self) -> bool:
         return str(self.mode).strip().lower() == "centralized"
 
+    def is_hybrid(self) -> bool:
+        return str(self.mode).strip().lower() == "hybrid"
+
+    def uses_storage_writes(self) -> bool:
+        """Whether this node should push KV pages to storage servers when available."""
+        return self.is_centralized() or self.is_hybrid()
+
+    def is_inference_client_only(self) -> bool:
+        """True when this inference node has no local published pool."""
+        return self.is_centralized() and self.effective_role() == "inference"
+
     def effective_role(self, *, for_storage_server: bool = False) -> str:
         """Resolve ``role=auto`` to ``inference`` or ``storage``."""
         r = str(self.role).strip().lower()
@@ -148,9 +160,10 @@ class PeerCacheConfig:
     def _validate(self) -> None:
         """Fail fast on misconfiguration with an actionable message."""
         mode = str(self.mode).strip().lower()
-        if mode not in ("p2p", "centralized"):
+        if mode not in ("p2p", "hybrid", "centralized"):
             raise ValueError(
-                f"peercache: mode must be 'p2p' or 'centralized', got {self.mode!r}"
+                f"peercache: mode must be 'p2p', 'hybrid', or 'centralized', "
+                f"got {self.mode!r}"
             )
         self.mode = mode
         role = str(self.role).strip().lower()
@@ -160,10 +173,8 @@ class PeerCacheConfig:
                 f"got {self.role!r}"
             )
         self.role = role
-        if mode == "p2p" and role == "storage":
-            raise ValueError(
-                "peercache: role='storage' requires mode='centralized'"
-            )
+        if role == "storage" and mode == "p2p":
+            pass  # storage servers may coexist with P2P inference nodes (hybrid cluster)
         if self.protocol not in ("rdma", "tcp"):
             raise ValueError(
                 f"peercache: protocol must be 'rdma' or 'tcp', got {self.protocol!r}"

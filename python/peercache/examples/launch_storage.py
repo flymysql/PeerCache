@@ -26,7 +26,6 @@ from peercache.storage_server import StorageServer
 def _build_config(args: argparse.Namespace) -> PeerCacheConfig:
     return PeerCacheConfig(
         discovery_addr=args.discovery_addr,
-        mode="centralized",
         role="storage",
         protocol=args.protocol,
         device_name=args.device_name,

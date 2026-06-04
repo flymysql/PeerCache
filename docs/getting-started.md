@@ -89,9 +89,11 @@ python -m sglang.launch_server \
 ## 3. Centralized mode (optional — dedicated KV cache servers)
 
 By default PeerCache is **P2P**: each SGLang node publishes KV into its own local
-pool and peers RDMA-read from the producer. Set `"mode": "centralized"` when you
-want **dedicated storage servers** that hold the KV bytes and directory shards,
-similar to a Mooncake Store–style layout, while inference nodes stay thin clients.
+pool and peers RDMA-read from the producer. Dedicated **storage servers**
+(`peercache-storage-server`) can run in the **same cluster** — use
+`mode=hybrid` (P2P + storage) or `mode=centralized` (storage only on inference
+nodes). Writes to storage use **RDMA WRITE** zero-copy (TCP fallback uses RPC
+copy when `protocol=tcp`).
 
 **Topology**
 
@@ -106,9 +108,11 @@ peercache-storage-server \
   --device-names mlx5_bond_1,mlx5_bond_2
 ```
 
-2. Launch SGLang inference workers with centralized client config:
+2. Launch SGLang inference workers (pick one mode):
 
 ```bash
+# centralized: storage-only writes (no local published pool)
+# hybrid:       storage writes + local P2P pool (same cluster as plain P2P nodes)
 python -m sglang.launch_server \
   ... \
   --hicache-storage-backend-extra-config '{
@@ -116,8 +120,7 @@ python -m sglang.launch_server \
     "module_path":  "peercache.store",
     "class_name":   "PeerCacheStore",
     "discovery_addr": "NODE0_IP:31998",
-    "mode": "centralized",
-    "role": "inference",
+    "mode": "hybrid",
     "protocol": "rdma",
     "device_name": "mlx5_0"
   }'
@@ -125,13 +128,14 @@ python -m sglang.launch_server \
 
 **How it differs from P2P**
 
-| | **P2P (default)** | **Centralized** |
-|---|---|---|
-| KV bytes | Stay on the producing inference node | Live on **storage servers** |
-| Directory | Sharded across **all** nodes | Sharded across **storage nodes only** |
-| Write path | Local memcpy + tiny directory PUT | RPC `data_ingest` to the owning storage node |
-| Read path | One-sided RDMA READ (unchanged) | One-sided RDMA READ from storage |
-| Extra process | None | `peercache-storage-server` per storage host |
+| | **P2P (default)** | **Hybrid** | **Centralized** |
+|---|---|---|---|
+| KV bytes | Stay on the producing inference node | **Storage servers** (+ local pool copy) | Live on **storage servers** |
+| Storage servers | Optional (ignored for writes) | **Same cluster** — writes go to storage | **Required** |
+| Directory | Sharded across **all** nodes | Sharded across **all** nodes (unified lookup) | Sharded across **all** nodes |
+| Write path | Local memcpy + directory PUT | **RDMA WRITE** to storage (+ local copy) | **RDMA WRITE** to storage |
+| Read path | One-sided RDMA READ (unchanged) | RDMA READ from storage or local pool | RDMA READ from storage |
+| Extra process | None | `peercache-storage-server` (optional) | `peercache-storage-server` |
 
 Inference nodes do **not** allocate a local published pool in centralized mode;
 size `global_segment_size` on storage servers instead. Discovery is unchanged —
@@ -185,7 +189,7 @@ Deployment mode:
 
 | key | default | meaning |
 |---|---|---|
-| `mode` | `p2p` | `p2p` (decentralized, KV on producer) or `centralized` (dedicated storage servers) |
+| `mode` | `p2p` | `p2p` (default), `hybrid` (P2P + storage in one cluster), or `centralized` (inference nodes are storage clients) |
 | `role` | `auto` | `inference` (SGLang client), `storage` (KV server — use `peercache-storage-server`), or `auto` (infer from process) |
 
 RDMA / transport:

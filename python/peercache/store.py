@@ -233,7 +233,7 @@ class PeerCacheStore(HiCacheStorage):
 
         # Re-shard the directory when ring membership changes (P2P producers and
         # centralized storage nodes only; inference clients have no local pool).
-        if not (self.config.is_centralized() and self.config.effective_role() == "inference"):
+        if not self.config.is_inference_client_only():
             self.runtime.add_member_listener(self._on_membership_change)
 
     # ------------------------------------------------------------------ #
@@ -287,7 +287,7 @@ class PeerCacheStore(HiCacheStorage):
 
         In centralized mode inference nodes are clients only — KV bytes live on
         storage servers, so no local published pool is created."""
-        if self.config.is_centralized() and self.config.effective_role() == "inference":
+        if self.config.is_inference_client_only():
             return
         if self._pool is not None:
             return
@@ -423,6 +423,8 @@ class PeerCacheStore(HiCacheStorage):
         # MRs lazily registered for unregistered local READ destinations (the
         # generic batch_get path); converges once SGLang's host pages are seen.
         m.set_gauge_provider("rdma_lazy_local_mrs", lambda: _tstat("lazy_local_mrs"))
+        m.set_gauge_provider("rdma_write_wc_errors", lambda: _tstat("write_wc_errors"))
+        m.set_gauge_provider("rdma_write_timeouts", lambda: _tstat("write_timeouts"))
 
     # ------------------------------------------------------------------ #
     # Disk promote: load a key from disk back into the pool (makes it readable)
@@ -613,26 +615,35 @@ class PeerCacheStore(HiCacheStorage):
     # Core publish / fetch over component objects
     # ------------------------------------------------------------------ #
     def _publish(self, comp_keys: List[str], ptrs: List[int], sizes: List[int]) -> List[bool]:
-        if self.config.is_centralized():
-            return self._publish_centralized(comp_keys, ptrs, sizes)
+        mode = self.config.mode
+        if mode == "p2p":
+            return self._publish_p2p(comp_keys, ptrs, sizes)
+        if mode == "centralized":
+            return self._publish_storage(comp_keys, ptrs, sizes)
+        # hybrid: storage tier when available, plus a local pool copy
+        if self.runtime.storage_nodes():
+            storage_res = self._publish_storage(comp_keys, ptrs, sizes)
+            local_res = self._publish_p2p(
+                comp_keys, ptrs, sizes, update_directory=False
+            )
+            return [bool(s or l) for s, l in zip(storage_res, local_res)]
         return self._publish_p2p(comp_keys, ptrs, sizes)
 
-    def _publish_centralized(
+    def _publish_storage(
         self, comp_keys: List[str], ptrs: List[int], sizes: List[int]
     ) -> List[bool]:
-        """Push pages to the storage node that owns each key's directory shard."""
+        """Push pages to a storage node via RDMA WRITE (zero-copy) or RPC fallback."""
         t0 = time.perf_counter()
         if not self.runtime.storage_nodes():
-            logger.warning(
-                "peercache: centralized mode but no storage nodes registered yet"
-            )
+            logger.warning("peercache: storage writes requested but no storage nodes registered")
             return [False] * len(comp_keys)
 
         existing = self.runtime.directory.exists(comp_keys)
         results = [False] * len(comp_keys)
-        pages_by_owner: Dict[str, List[dict]] = {}
-        key_to_idx: Dict[str, int] = {}
+        key_to_idx = {k: i for i, k in enumerate(comp_keys)}
 
+        # Group pending pages by target storage owner.
+        pending: Dict[str, List[dict]] = {}
         for i, key in enumerate(comp_keys):
             if existing[i]:
                 results[i] = True
@@ -640,32 +651,122 @@ class PeerCacheStore(HiCacheStorage):
             owner = self.runtime.data_owner(key)
             if owner is None:
                 continue
-            key_to_idx[key] = i
-            data = ctypes.string_at(ptrs[i], sizes[i])
-            pages_by_owner.setdefault(owner, []).append({"key": key, "data": data})
+            pending.setdefault(owner, []).append(
+                {"key": key, "length": sizes[i], "local_ptr": ptrs[i], "idx": i}
+            )
 
         published_bytes = 0
-        for owner, pages in pages_by_owner.items():
+        transport = self.runtime.transport
+
+        for owner, pages in pending.items():
             endpoint = self.runtime.discovery.control_of(owner)
             if endpoint is None:
                 continue
             try:
-                resp = self._data_rpc.call(endpoint, "data_ingest", {"pages": pages})
-                oks = resp.get("ok", [])
+                prep = self._data_rpc.call(
+                    endpoint,
+                    "data_prepare_writes",
+                    {"pages": [{"key": p["key"], "length": p["length"]} for p in pages]},
+                )
+                slots = prep.get("slots") or []
             except Exception as e:
-                logger.debug("peercache: data_ingest to %s failed: %s", owner, e)
+                logger.debug("peercache: data_prepare_writes to %s failed: %s", owner, e)
                 continue
-            for page, ok in zip(pages, oks):
-                idx = key_to_idx.get(page["key"])
+
+            # RDMA WRITE (or TCP write fallback) for each reserved slot.
+            w_nodes: List[str] = []
+            w_local: List[int] = []
+            w_remote: List[int] = []
+            w_len: List[int] = []
+            w_keys: List[str] = []
+            w_idx: List[int] = []
+            rail_eps: Dict[str, List[str]] = {}
+            rail_rks: Dict[str, List[int]] = {}
+
+            for page, slot in zip(pages, slots):
+                if not slot:
+                    continue
+                nk = slot["rdma_endpoint"]
+                if nk not in rail_eps:
+                    rail_eps[nk] = list(slot.get("rail_endpoints") or [nk])
+                    rail_rks[nk] = [int(x) for x in (slot.get("rail_rkeys") or [slot["rkey"]])]
+                w_nodes.append(nk)
+                w_local.append(page["local_ptr"])
+                w_remote.append(int(slot["remote_addr"]))
+                w_len.append(int(slot["length"]))
+                w_keys.append(page["key"])
+                w_idx.append(page["idx"])
+
+            write_ok: Dict[str, bool] = {}
+            if w_keys:
+                try:
+                    oks = transport.batch_write_multi(
+                        w_nodes, w_local, w_remote, w_len, rail_eps, rail_rks
+                    )
+                except Exception as e:
+                    logger.debug("peercache: batch_write_multi to %s failed: %s", owner, e)
+                    oks = [False] * len(w_keys)
+                commit_keys = [k for k, ok in zip(w_keys, oks) if ok]
+                for k, ok in zip(w_keys, oks):
+                    write_ok[k] = bool(ok)
+                if commit_keys:
+                    try:
+                        resp = self._data_rpc.call(
+                            endpoint, "data_commit_writes", {"keys": commit_keys}
+                        )
+                        committed = {
+                            k: v
+                            for k, v in zip(commit_keys, resp.get("ok") or [])
+                            if v
+                        }
+                    except Exception as e:
+                        logger.debug("peercache: data_commit_writes failed: %s", e)
+                        committed = {}
+                else:
+                    committed = {}
+            else:
+                committed = {}
+
+            for key, ok in write_ok.items():
+                if not ok or key not in committed:
+                    continue
+                idx = key_to_idx.get(key)
                 if idx is not None:
-                    results[idx] = bool(ok)
-                    if ok:
-                        published_bytes += sizes[idx]
+                    results[idx] = True
+                    published_bytes += sizes[idx]
+
+            # RPC copy fallback for pages the data-plane write could not commit.
+            fallback = [
+                p for p in pages
+                if not results[p["idx"]]
+            ]
+            if fallback:
+                ingest_pages = [{
+                    "key": p["key"],
+                    "data": ctypes.string_at(p["local_ptr"], p["length"]),
+                } for p in fallback]
+                try:
+                    resp = self._data_rpc.call(
+                        endpoint, "data_ingest", {"pages": ingest_pages}
+                    )
+                    for p, ok in zip(fallback, resp.get("ok") or []):
+                        if ok:
+                            results[p["idx"]] = True
+                            published_bytes += p["length"]
+                except Exception as e:
+                    logger.debug("peercache: data_ingest fallback failed: %s", e)
 
         self._metrics.record_write(published_bytes, time.perf_counter() - t0)
         return results
 
-    def _publish_p2p(self, comp_keys: List[str], ptrs: List[int], sizes: List[int]) -> List[bool]:
+    def _publish_p2p(
+        self,
+        comp_keys: List[str],
+        ptrs: List[int],
+        sizes: List[int],
+        *,
+        update_directory: bool = True,
+    ) -> List[bool]:
         t0 = time.perf_counter()
         # Skip components already present in the directory (idempotent set).
         existing = self.runtime.directory.exists(comp_keys)
@@ -712,7 +813,7 @@ class PeerCacheStore(HiCacheStorage):
                 )
             else:
                 entries[key].remote_addr = al[0]
-        if entries:
+        if entries and update_directory:
             self.runtime.directory.put(entries)
         self._metrics.record_write(published_bytes, time.perf_counter() - t0)
         return results
@@ -816,6 +917,15 @@ class PeerCacheStore(HiCacheStorage):
                 continue
             if loc.length != sizes[i]:
                 continue  # size mismatch -> treat as miss
+            # Hybrid: prefer a local pool copy (written alongside storage) before
+            # issuing a remote READ from the storage tier.
+            if self.config.is_hybrid() and self._pool is not None:
+                al = self._pool.address_of(comp_keys[i])
+                if al is not None and al[1] == sizes[i]:
+                    ctypes.memmove(ptrs[i], al[0], al[1])
+                    results[i] = True
+                    sources[i] = "local"
+                    continue
             if loc.node_id == self.config.node_id:
                 ctypes.memmove(ptrs[i], loc.remote_addr, loc.length)
                 results[i] = True

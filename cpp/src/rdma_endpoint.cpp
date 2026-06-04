@@ -144,6 +144,29 @@ bool RdmaEndpoint::post_read(uint64_t local_addr, uint32_t lkey,
   return ibv_post_send(qp_, &wr, &bad) == 0;
 }
 
+bool RdmaEndpoint::post_write(uint64_t local_addr, uint32_t lkey,
+                             uint64_t remote_addr, uint32_t rkey,
+                             uint64_t length, uint64_t wr_id) {
+  ibv_sge sge;
+  std::memset(&sge, 0, sizeof(sge));
+  sge.addr = local_addr;
+  sge.length = static_cast<uint32_t>(length);
+  sge.lkey = lkey;
+
+  ibv_send_wr wr;
+  std::memset(&wr, 0, sizeof(wr));
+  wr.wr_id = wr_id;
+  wr.sg_list = &sge;
+  wr.num_sge = 1;
+  wr.opcode = IBV_WR_RDMA_WRITE;
+  wr.send_flags = IBV_SEND_SIGNALED;
+  wr.wr.rdma.remote_addr = remote_addr;
+  wr.wr.rdma.rkey = rkey;
+
+  ibv_send_wr* bad = nullptr;
+  return ibv_post_send(qp_, &wr, &bad) == 0;
+}
+
 bool RdmaEndpoint::drain(size_t count, std::vector<bool>& ok, double timeout_s) {
   size_t seen = 0;
   ibv_wc wc[kPollBatch];
@@ -176,7 +199,7 @@ bool RdmaEndpoint::drain(size_t count, std::vector<bool>& ok, double timeout_s) 
         ++wc_errors_;
         if (wc_errors_ <= 8 || wc_errors_ % 256 == 0) {
           std::fprintf(stderr,
-                       "peercache: RDMA READ completion failed: %s (status=%d, "
+                       "peercache: RDMA completion failed: %s (status=%d, "
                        "wr_id=%llu); total wc errors=%llu\n",
                        ibv_wc_status_str(wc[i].status), wc[i].status,
                        static_cast<unsigned long long>(wc[i].wr_id),

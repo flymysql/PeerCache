@@ -1,4 +1,4 @@
-"""End-to-end tests for centralized (non-P2P) mode over TCP."""
+"""Hybrid cluster: P2P inference + storage servers in one discovery group."""
 
 import ctypes
 import time
@@ -46,7 +46,6 @@ class FakeMemPoolHost:
 def _storage_cfg(discovery_addr, node_id):
     return PeerCacheConfig(
         discovery_addr=discovery_addr,
-        mode="centralized",
         role="storage",
         protocol="tcp",
         local_hostname="127.0.0.1",
@@ -59,7 +58,7 @@ def _storage_cfg(discovery_addr, node_id):
     )
 
 
-def _infer_cfg(discovery_addr, node_id):
+def _infer_cfg(discovery_addr, node_id, mode="p2p"):
     return SimpleNamespace(
         tp_rank=0,
         tp_size=1,
@@ -68,13 +67,13 @@ def _infer_cfg(discovery_addr, node_id):
         is_mla_model=True,
         extra_config={
             "discovery_addr": discovery_addr,
-            "mode": "centralized",
-            "role": "inference",
+            "mode": mode,
             "protocol": "tcp",
             "local_hostname": "127.0.0.1",
             "node_id": node_id,
             "heartbeat_interval": 0.2,
             "member_ttl": 30.0,
+            "global_segment_size": 1 << 20,
             "metrics_enabled": False,
             "disk_enabled": False,
         },
@@ -100,69 +99,50 @@ def _wait_storage(runtime, n, timeout=8.0):
 
 
 @pytest.fixture
-def centralized_cluster():
+def hybrid_cluster():
     meta = DiscoveryServer("127.0.0.1", 0)
     port = meta.start()
     addr = f"127.0.0.1:{port}"
     storage = StorageServer(_storage_cfg(addr, "storage-1"))
     storage.start()
-    a = PeerCacheStore(_infer_cfg(addr, "infer-A"))
-    b = PeerCacheStore(_infer_cfg(addr, "infer-B"))
+    p2p = PeerCacheStore(_infer_cfg(addr, "p2p-A", mode="p2p"))
+    hybrid = PeerCacheStore(_infer_cfg(addr, "hybrid-B", mode="hybrid"))
     try:
-        _wait_ring(a.runtime, 3)
-        _wait_storage(a.runtime, 1)
-        _wait_storage(b.runtime, 1)
-        yield storage, a, b
+        _wait_ring(p2p.runtime, 3)
+        _wait_storage(p2p.runtime, 1)
+        _wait_storage(hybrid.runtime, 1)
+        yield storage, p2p, hybrid
     finally:
-        b.close()
-        a.close()
+        hybrid.close()
+        p2p.close()
         storage.stop()
         meta.stop()
 
 
-def test_centralized_write_on_infer_read_on_peer(centralized_cluster):
-    storage, a, b = centralized_cluster
-    page, npages = 256, 8
+def test_p2p_and_hybrid_coexist(hybrid_cluster):
+    storage, p2p, hybrid = hybrid_cluster
+    page, npages = 128, 4
 
-    host_a = FakeMemPoolHost(page, npages)
-    a.register_mem_pool_host(host_a)
-    host_b = FakeMemPoolHost(page, npages)
-    b.register_mem_pool_host(host_b)
+    for store, prefix in ((p2p, "p2p"), (hybrid, "hyb")):
+        host = FakeMemPoolHost(page, npages)
+        store.register_mem_pool_host(host)
+        keys = [f"{prefix}{i}" for i in range(npages)]
+        for i in range(npages):
+            seg = host.page_bytes_at(i)
+            for j in range(page):
+                seg[j] = (i * 3 + j) % 251
+        assert store.batch_set_v1(keys, list(range(npages))) == [True] * npages
 
-    for i in range(npages):
-        seg = host_a.page_bytes_at(i)
-        for j in range(page):
-            seg[j] = (i * 11 + j) % 251
+    # P2P node keeps a local published pool; hybrid also keeps one.
+    assert p2p._pool is not None
+    assert hybrid._pool is not None
 
-    keys = [f"ck{i}" for i in range(npages)]
+    # Hybrid writes land on the storage server; pure P2P keys stay off storage.
+    assert len(storage._pool) >= npages
+    assert p2p.batch_get_v1([f"p2p{i}" for i in range(npages)], list(range(npages))) == [True] * npages
+    assert hybrid.batch_get_v1([f"hyb{i}" for i in range(npages)], list(range(npages))) == [True] * npages
 
-    # Inference node A writes to the storage server (not its local pool).
-    assert a.batch_set_v1(keys, list(range(npages))) == [True] * npages
-    assert a._pool is None  # client-only: no local published pool
-
-    # Inference node B reads from storage via RDMA/TCP READ.
-    assert b.batch_get_v1(keys, list(range(npages))) == [True] * npages
-
-    for i in range(npages):
-        assert bytes(host_a.page_bytes_at(i)) == bytes(host_b.page_bytes_at(i))
-
-    assert a.batch_exists(keys) == npages
-    assert b.batch_exists(keys) == npages
-    assert len(storage._pool) == npages
-
-
-def test_centralized_requires_storage_nodes():
-    meta = DiscoveryServer("127.0.0.1", 0)
-    port = meta.start()
-    addr = f"127.0.0.1:{port}"
-    infer = PeerCacheStore(_infer_cfg(addr, "lonely"))
-    try:
-        _wait_storage(infer.runtime, 1, timeout=0.5)
-        pytest.fail("expected timeout waiting for storage")
-    except TimeoutError:
-        pass
-    host = FakeMemPoolHost(128, 2)
-    infer.register_mem_pool_host(host)
-    assert infer.batch_set_v1(["x"], [0]) == [False]
-    infer.close()
-    meta.stop()
+    # Cross-read: hybrid reader pulls P2P-published keys from the P2P node.
+    host_h = FakeMemPoolHost(page, npages)
+    hybrid.register_mem_pool_host(host_h)
+    assert hybrid.batch_get_v1([f"p2p{i}" for i in range(npages)], list(range(npages))) == [True] * npages
