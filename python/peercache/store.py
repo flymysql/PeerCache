@@ -620,14 +620,24 @@ class PeerCacheStore(HiCacheStorage):
             return self._publish_p2p(comp_keys, ptrs, sizes)
         if mode == "centralized":
             return self._publish_storage(comp_keys, ptrs, sizes)
-        # hybrid: storage tier when available, plus a local pool copy
-        if self.runtime.storage_nodes():
-            storage_res = self._publish_storage(comp_keys, ptrs, sizes)
-            local_res = self._publish_p2p(
-                comp_keys, ptrs, sizes, update_directory=False
-            )
-            return [bool(s or l) for s, l in zip(storage_res, local_res)]
-        return self._publish_p2p(comp_keys, ptrs, sizes)
+        # hybrid: write_policy selects local / storage / both
+        policy = self.config.write_policy
+        has_storage = bool(self.runtime.storage_nodes())
+        if policy == "local" or not has_storage:
+            if policy in ("storage", "both") and not has_storage:
+                logger.warning(
+                    "peercache: hybrid write_policy=%s but no storage nodes registered; "
+                    "falling back to local publish", policy,
+                )
+            return self._publish_p2p(comp_keys, ptrs, sizes)
+        if policy == "storage":
+            return self._publish_storage(comp_keys, ptrs, sizes)
+        # both: storage tier for cross-node sharing + local copy (no extra dir PUT)
+        storage_res = self._publish_storage(comp_keys, ptrs, sizes)
+        local_res = self._publish_p2p(
+            comp_keys, ptrs, sizes, update_directory=False
+        )
+        return [bool(s or l) for s, l in zip(storage_res, local_res)]
 
     def _publish_storage(
         self, comp_keys: List[str], ptrs: List[int], sizes: List[int]
@@ -917,9 +927,12 @@ class PeerCacheStore(HiCacheStorage):
                 continue
             if loc.length != sizes[i]:
                 continue  # size mismatch -> treat as miss
-            # Hybrid: prefer a local pool copy (written alongside storage) before
-            # issuing a remote READ from the storage tier.
-            if self.config.is_hybrid() and self._pool is not None:
+            # Hybrid dual-write: prefer the local pool copy before READing storage.
+            if (
+                self.config.is_hybrid()
+                and self.config.write_policy == "both"
+                and self._pool is not None
+            ):
                 al = self._pool.address_of(comp_keys[i])
                 if al is not None and al[1] == sizes[i]:
                     ctypes.memmove(ptrs[i], al[0], al[1])

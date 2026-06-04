@@ -36,10 +36,15 @@ class PeerCacheConfig:
 
     # Deployment mode (per inference node; storage servers use role=storage):
     #   p2p          - default: KV stays on the producing node (decentralized)
-    #   hybrid       - write to storage servers (RDMA WRITE) when present AND
-    #                    keep a local pool copy; P2P and storage coexist in one cluster
+    #   hybrid       - P2P and storage servers coexist; use write_policy to choose
+    #                    where hybrid inference nodes publish (default: local only)
     #   centralized  - inference nodes are clients; KV only on storage servers
     mode: str = "p2p"
+    # Hybrid write policy (ignored in p2p / centralized):
+    #   local   - default: publish locally only (P2P path), even if storage servers exist
+    #   storage - RDMA WRITE to storage servers only (directory points at storage)
+    #   both    - dual write: storage (for cross-node sharing) + local pool copy
+    write_policy: str = "local"
     # Node role (centralized mode only):
     #   auto       - infer from the process (PeerCacheStore -> inference,
     #                peercache-storage-server -> storage)
@@ -144,7 +149,19 @@ class PeerCacheConfig:
 
     def uses_storage_writes(self) -> bool:
         """Whether this node should push KV pages to storage servers when available."""
-        return self.is_centralized() or self.is_hybrid()
+        if self.is_centralized():
+            return True
+        if self.is_hybrid():
+            return self.write_policy in ("storage", "both")
+        return False
+
+    def writes_local_pool(self) -> bool:
+        """Whether this node publishes into its local published pool."""
+        if self.is_inference_client_only():
+            return False
+        if self.is_hybrid():
+            return self.write_policy in ("local", "both")
+        return True
 
     def is_inference_client_only(self) -> bool:
         """True when this inference node has no local published pool."""
@@ -173,6 +190,13 @@ class PeerCacheConfig:
                 f"got {self.role!r}"
             )
         self.role = role
+        wp = str(getattr(self, "write_policy", "local")).strip().lower()
+        if wp not in ("local", "storage", "both"):
+            raise ValueError(
+                f"peercache: write_policy must be 'local', 'storage', or 'both', "
+                f"got {self.write_policy!r}"
+            )
+        self.write_policy = wp
         if role == "storage" and mode == "p2p":
             pass  # storage servers may coexist with P2P inference nodes (hybrid cluster)
         if self.protocol not in ("rdma", "tcp"):
@@ -244,6 +268,7 @@ class PeerCacheConfig:
             "discovery_addr",
             "mode",
             "role",
+            "write_policy",
             "protocol",
             "device_name",
             "device_names",

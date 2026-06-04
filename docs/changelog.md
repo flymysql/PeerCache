@@ -2,6 +2,11 @@
 
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.8.2] - 2026-06-04
+
+### Added
+- Hybrid **`write_policy`**: `local` (default), `storage`, or `both`.
+
 ## [0.8.1] - 2026-06-04
 
 ### Added

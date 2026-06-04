@@ -6,6 +6,13 @@ All notable changes to PeerCache are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.8.2] - 2026-06-04
+
+### Added
+- **`write_policy` for hybrid mode** — configurable where hybrid inference nodes
+  publish: `local` (default, P2P-only even when storage servers exist), `storage`
+  (RDMA WRITE to storage only), or `both` (dual write: storage + local pool copy).
+
 ## [0.8.1] - 2026-06-04
 
 ### Added

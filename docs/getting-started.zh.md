@@ -82,7 +82,8 @@ python -m sglang.launch_server \
 
 默认 PeerCache 为 **P2P**。专用 **storage server** 可与 P2P 节点**同一集群**
 共存:`mode=hybrid`(P2P+storage)或 `mode=centralized`(推理节点仅作客户端)。
-写入 storage 走 **RDMA WRITE** 零拷贝(TCP 回退时用 RPC 拷贝)。
+hybrid 下 **`write_policy`** 默认 `local`(只写本地,与 P2P 相同);可选 `storage`(只写
+storage)或 `both`(双写:storage+本地副本)。
 
 1. 启动存储服务器(无需 SGLang):
 

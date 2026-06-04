@@ -133,7 +133,7 @@ python -m sglang.launch_server \
 | KV bytes | Stay on the producing inference node | **Storage servers** (+ local pool copy) | Live on **storage servers** |
 | Storage servers | Optional (ignored for writes) | **Same cluster** — writes go to storage | **Required** |
 | Directory | Sharded across **all** nodes | Sharded across **all** nodes (unified lookup) | Sharded across **all** nodes |
-| Write path | Local memcpy + directory PUT | **RDMA WRITE** to storage (+ local copy) | **RDMA WRITE** to storage |
+| Write path | Local memcpy + directory PUT | **`local`:** same as P2P · **`storage`:** RDMA WRITE · **`both`:** both | RDMA WRITE to storage |
 | Read path | One-sided RDMA READ (unchanged) | RDMA READ from storage or local pool | RDMA READ from storage |
 | Extra process | None | `peercache-storage-server` (optional) | `peercache-storage-server` |
 
@@ -190,6 +190,7 @@ Deployment mode:
 | key | default | meaning |
 |---|---|---|
 | `mode` | `p2p` | `p2p` (default), `hybrid` (P2P + storage in one cluster), or `centralized` (inference nodes are storage clients) |
+| `write_policy` | `local` | **Hybrid only:** `local` (default — P2P publish only), `storage` (RDMA WRITE to storage servers), or `both` (dual write: storage + local copy) |
 | `role` | `auto` | `inference` (SGLang client), `storage` (KV server — use `peercache-storage-server`), or `auto` (infer from process) |
 
 RDMA / transport:
