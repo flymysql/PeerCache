@@ -123,6 +123,38 @@ class Transport:
             rks.append(ks[rail] if ks else 0)
         return self.batch_read_v(nodes, local_addrs, remote_addrs, rks, lengths)
 
+    def batch_write_v(
+        self,
+        remote_nodes: List[str],
+        local_addrs: List[int],
+        remote_addrs: List[int],
+        rkeys: List[int],
+        lengths: List[int],
+    ) -> List[bool]:
+        raise NotImplementedError("batch_write requires RDMA or TCP transport support")
+
+    def batch_write_multi(
+        self,
+        node_ids: List[str],
+        local_addrs: List[int],
+        remote_addrs: List[int],
+        lengths: List[int],
+        rail_endpoints: dict,
+        rail_rkeys: dict,
+    ) -> List[bool]:
+        N = max(1, self.n_rails())
+        nodes: List[str] = []
+        for i, node in enumerate(node_ids):
+            eps = rail_endpoints.get(node) or []
+            rail = i % N if (i % N) < len(eps) else 0
+            nodes.append(eps[rail] if eps else "")
+        rks: List[int] = []
+        for i, node in enumerate(node_ids):
+            ks = rail_rkeys.get(node) or [0]
+            rail = i % N if (i % N) < len(ks) else 0
+            rks.append(ks[rail] if ks else 0)
+        return self.batch_write_v(nodes, local_addrs, remote_addrs, rks, lengths)
+
     def local_endpoint(self) -> str:  # pragma: no cover
         raise NotImplementedError
 
@@ -191,6 +223,16 @@ class RdmaTransport(Transport):
             node_ids, local_addrs, remote_addrs, lengths,
             rail_endpoints, rail_rkeys))
 
+    def batch_write_v(self, remote_nodes, local_addrs, remote_addrs, rkeys, lengths):
+        return list(self._engine.batch_write_v(
+            remote_nodes, local_addrs, remote_addrs, rkeys, lengths))
+
+    def batch_write_multi(self, node_ids, local_addrs, remote_addrs, lengths,
+                          rail_endpoints, rail_rkeys):
+        return list(self._engine.batch_write_multi(
+            node_ids, local_addrs, remote_addrs, lengths,
+            rail_endpoints, rail_rkeys))
+
     def stats(self) -> dict:
         return dict(self._engine.stats())
 
@@ -215,6 +257,11 @@ def _recv_exact(sock: socket.socket, n: int) -> Optional[bytes]:
         chunks.append(b)
         got += len(b)
     return b"".join(chunks)
+
+
+# TCP data-plane opcodes (1 byte prefix on every frame).
+_TCP_OP_READ = 1
+_TCP_OP_WRITE = 2
 
 
 class TcpTransport(Transport):
@@ -283,16 +330,31 @@ class TcpTransport(Transport):
         with conn:
             conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             while self._running:
-                hdr = _recv_exact(conn, 16)
+                hdr = _recv_exact(conn, 17)
                 if hdr is None:
                     return
-                remote_addr, length = struct.unpack(">QQ", hdr)
-                if not self._covered(remote_addr, length):
-                    return  # close on invalid request
-                data = ctypes.string_at(remote_addr, length)
-                try:
-                    conn.sendall(data)
-                except OSError:
+                op = hdr[0]
+                remote_addr, length = struct.unpack(">QQ", hdr[1:17])
+                if op == _TCP_OP_READ:
+                    if not self._covered(remote_addr, length):
+                        return
+                    data = ctypes.string_at(remote_addr, length)
+                    try:
+                        conn.sendall(data)
+                    except OSError:
+                        return
+                elif op == _TCP_OP_WRITE:
+                    data = _recv_exact(conn, length)
+                    if data is None or len(data) != length:
+                        return
+                    ok = b"\x01" if self._covered(remote_addr, length) else b"\x00"
+                    if ok == b"\x01":
+                        ctypes.memmove(remote_addr, data, length)
+                    try:
+                        conn.sendall(ok)
+                    except OSError:
+                        return
+                else:
                     return
 
     def _acquire(self, endpoint: str) -> socket.socket:
@@ -326,7 +388,9 @@ class TcpTransport(Transport):
                 # Lease a dedicated socket; a single in-flight request per socket
                 # keeps framing trivial while allowing cross-thread parallelism.
                 sock = self._acquire(op.remote_endpoint)
-                sock.sendall(struct.pack(">QQ", op.remote_addr, op.length))
+                sock.sendall(
+                    struct.pack(">BQQ", _TCP_OP_READ, op.remote_addr, op.length)
+                )
                 data = _recv_exact(sock, op.length)
                 if data is not None and len(data) == op.length:
                     buf = (ctypes.c_char * op.length).from_buffer_copy(data)
@@ -337,6 +401,35 @@ class TcpTransport(Transport):
             except Exception:
                 ok = False
             if sock is not None:  # error path: do not reuse a broken socket
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+            results.append(ok)
+        return results
+
+    def batch_write_v(self, remote_nodes, local_addrs, remote_addrs, rkeys, lengths):
+        results: List[bool] = []
+        for i in range(len(lengths)):
+            ok = False
+            sock = None
+            try:
+                sock = self._acquire(remote_nodes[i])
+                payload = ctypes.string_at(local_addrs[i], lengths[i])
+                sock.sendall(
+                    struct.pack(
+                        ">BQQ", _TCP_OP_WRITE, remote_addrs[i], lengths[i]
+                    )
+                    + payload
+                )
+                resp = _recv_exact(sock, 1)
+                if resp == b"\x01":
+                    ok = True
+                    self._release(remote_nodes[i], sock)
+                    sock = None
+            except Exception:
+                ok = False
+            if sock is not None:
                 try:
                     sock.close()
                 except Exception:

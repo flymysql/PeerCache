@@ -23,6 +23,16 @@ struct ReadRequest {
   uint64_t length = 0;      // bytes to transfer
 };
 
+// One one-sided RDMA WRITE: push [local_addr, local_addr+length) from our
+// locally-registered MR into the peer's remote_addr using rkey.
+struct WriteRequest {
+  std::string remote_node;
+  uint64_t local_addr = 0;   // source address in a locally-registered MR
+  uint64_t remote_addr = 0; // destination in the peer's published-pool MR
+  uint32_t rkey = 0;
+  uint64_t length = 0;
+};
+
 // Wire-format QP identity exchanged during the TCP bootstrap handshake.
 struct QpInfo {
   uint32_t qp_num = 0;

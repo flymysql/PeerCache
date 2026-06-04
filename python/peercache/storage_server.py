@@ -35,14 +35,12 @@ logger = logging.getLogger(__name__)
 
 
 class StorageServer:
-    """Centralized-mode storage node: pool + directory shard + disk tier."""
+    """Dedicated storage node: pool + directory shard + disk tier.
+
+    Coexists with P2P inference nodes in the same cluster; inference nodes in
+    ``hybrid`` or ``centralized`` mode RDMA-WRITE pages here."""
 
     def __init__(self, config: PeerCacheConfig):
-        if not config.is_centralized():
-            raise ValueError(
-                "peercache: StorageServer requires mode='centralized' "
-                f"(got {config.mode!r})"
-            )
         if config.role == "auto":
             config.role = "storage"
         elif config.effective_role() != "storage":
@@ -91,6 +89,8 @@ class StorageServer:
                 )
 
         self._ensure_pool()
+        self.runtime.control_rpc.register("data_prepare_writes", self._on_data_prepare_writes)
+        self.runtime.control_rpc.register("data_commit_writes", self._on_data_commit_writes)
         self.runtime.control_rpc.register("data_ingest", self._on_data_ingest)
         self.runtime.control_rpc.register("data_promote", self._on_data_promote)
         self.runtime.add_member_listener(self._on_membership_change)
@@ -194,6 +194,74 @@ class StorageServer:
             except Exception:
                 pass
         return out
+
+    def _on_data_prepare_writes(self, args: dict) -> dict:
+        """Reserve pool slots and return RDMA WRITE targets (zero-copy path)."""
+        pages = args.get("pages") or []
+        slots: List[Optional[dict]] = []
+        keys = [p.get("key") for p in pages if p.get("key")]
+        existing = self.runtime.directory.exists(keys) if keys else []
+        exist_map = dict(zip(keys, existing))
+
+        for p in pages:
+            key = p.get("key")
+            length = int(p.get("length") or 0)
+            if not key or length <= 0:
+                slots.append(None)
+                continue
+            if exist_map.get(key):
+                al = self._pool.address_of(key)
+                if al is not None:
+                    addr, ln = al
+                    slots.append(self._slot_dict(key, addr, ln))
+                    continue
+            remote_addr = self._pool.reserve(key, length)
+            if remote_addr is None:
+                slots.append(None)
+                continue
+            slots.append(self._slot_dict(key, remote_addr, length))
+        return {"slots": slots}
+
+    def _slot_dict(self, key: str, remote_addr: int, length: int) -> dict:
+        return {
+            "key": key,
+            "node_id": self.config.node_id,
+            "rdma_endpoint": self.runtime.local_rdma_endpoint,
+            "remote_addr": remote_addr,
+            "rkey": self._pool.rkey,
+            "rail_endpoints": list(self._rail_endpoints),
+            "rail_rkeys": list(self._pool.rkeys),
+            "length": length,
+        }
+
+    def _on_data_commit_writes(self, args: dict) -> dict:
+        """After a remote RDMA WRITE lands, publish directory entries + disk tier."""
+        keys: List[str] = list(args.get("keys") or [])
+        results = [False] * len(keys)
+        entries: Dict[str, DataLocation] = {}
+        for i, key in enumerate(keys):
+            al = self._pool.address_of(key)
+            if al is None:
+                continue
+            addr, length = al
+            entries[key] = self._resident_location(addr, length)
+            with self._key_len_lock:
+                self._key_len[key] = length
+            if self._disk is not None:
+                try:
+                    data = ctypes.string_at(addr, length)
+                    self._disk.put(key, data)
+                    self._metrics.inc("disk_writes")
+                    self._metrics.inc("disk_bytes_written", length)
+                except Exception as e:
+                    logger.debug("peercache: disk write-through failed: %s", e)
+            results[i] = True
+        if entries:
+            self.runtime.directory.put(entries)
+            self._metrics.record_write(
+                sum(e.length for e in entries.values()), 0.0
+            )
+        return {"ok": results}
 
     def _on_data_ingest(self, args: dict) -> dict:
         """RPC: inference node pushes KV page bytes into this storage pool."""

@@ -35,7 +35,11 @@ class RdmaEndpoint {
   bool post_read(uint64_t local_addr, uint32_t lkey, uint64_t remote_addr,
                  uint32_t rkey, uint64_t length, uint64_t wr_id);
 
-  // Drain `count` completions from this endpoint's private CQ. For every
+  // Post a one-sided WRITE (does not wait). local_addr/lkey is the source MR.
+  bool post_write(uint64_t local_addr, uint32_t lkey, uint64_t remote_addr,
+                  uint32_t rkey, uint64_t length, uint64_t wr_id);
+
+  // Drain `count` send completions from this endpoint's private CQ.
   // successful completion whose wr_id is in range, ok[wr_id] is set true.
   // Polls for at most `timeout_s` seconds; if completions stop arriving (e.g. a
   // RoCE misconfiguration where READs are silently black-holed and never

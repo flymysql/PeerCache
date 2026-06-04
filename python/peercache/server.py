@@ -120,7 +120,7 @@ class NodeRuntime:
             meta_port=config.meta_port(),
             max_masters=config.max_masters,
         )
-        dir_ring = self._data_ring if config.is_centralized() else self.ring
+        dir_ring = self.ring
         self.directory = DirectoryClient(
             dir_ring,
             resolve_control=self.discovery.control_of,
@@ -138,16 +138,15 @@ class NodeRuntime:
             m.node_id for m in members
             if getattr(m, "role", "inference") == "storage"
         ]
-        if self.config.is_centralized():
-            changed = set(storage_ids) != set(self._data_ring.nodes)
-            self._data_ring.set_nodes(storage_ids)
-            self.directory.set_ring(self._data_ring)
-            # Keep the full ring for diagnostics / future use.
-            self.ring.set_nodes(all_ids)
-        else:
-            changed = set(all_ids) != set(self.ring.nodes)
-            self.ring.set_nodes(all_ids)
-            self.directory.set_ring(self.ring)
+        changed = (
+            set(all_ids) != set(self.ring.nodes)
+            or set(storage_ids) != set(self._data_ring.nodes)
+        )
+        self.ring.set_nodes(all_ids)
+        self._data_ring.set_nodes(storage_ids)
+        # Directory is always sharded across all live nodes so P2P and storage
+        # locations share one lookup namespace in hybrid clusters.
+        self.directory.set_ring(self.ring)
         logger.debug(
             "peercache membership: all=%s storage=%s mode=%s",
             all_ids, storage_ids, self.config.mode,
@@ -160,14 +159,13 @@ class NodeRuntime:
                     logger.debug("peercache: member listener failed: %s", e)
 
     def data_owner(self, key: str) -> Optional[str]:
-        """Return the node_id that owns `key` in the current data/directory ring."""
-        ring = self._data_ring if self.config.is_centralized() else self.ring
-        return ring.get_node(key)
+        """Return the storage node that should hold `key`, or None if no storage tier."""
+        if not self._data_ring.nodes:
+            return None
+        return self._data_ring.get_node(key)
 
     def storage_nodes(self) -> List[str]:
-        """Live storage node ids (centralized mode). Empty in p2p mode."""
-        if not self.config.is_centralized():
-            return []
+        """Live dedicated storage node ids (empty when none registered)."""
         return list(self._data_ring.nodes)
 
     def start(self) -> None:

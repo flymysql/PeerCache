@@ -2,6 +2,16 @@
 
 本项目遵循 [语义化版本](https://semver.org/)。
 
+## [0.8.1] - 2026-06-04
+
+### 新增
+- Storage 写入走 **RDMA WRITE** 零拷贝(`data_prepare_writes` →
+  `batch_write_multi` → `data_commit_writes`);保留 RPC ingest 回退。
+- **`mode=hybrid`** — P2P 与 storage server 同一集群共存。
+
+### 变更
+- 目录统一分片于所有节点;storage 数据放置用独立 storage ring。
+
 ## [0.8.0] - 2026-06-04
 
 ### 新增

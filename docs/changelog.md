@@ -2,6 +2,16 @@
 
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.8.1] - 2026-06-04
+
+### Added
+- RDMA WRITE zero-copy path to storage servers (`data_prepare_writes` →
+  `batch_write_multi` → `data_commit_writes`); RPC ingest fallback retained.
+- `mode=hybrid` for P2P + storage servers in one cluster.
+
+### Changed
+- Unified directory ring across all nodes; storage placement uses a storage ring.
+
 ## [0.8.0] - 2026-06-04
 
 ### Added

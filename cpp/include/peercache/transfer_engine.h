@@ -57,6 +57,20 @@ class TransferEngine {
       const std::map<std::string, std::vector<std::string>>& rail_endpoints,
       const std::map<std::string, std::vector<uint32_t>>& rail_rkeys);
 
+  // One-sided RDMA WRITEs into remote published pools (centralized/hybrid writes).
+  std::vector<bool> batch_write_v(const std::vector<std::string>& remote_nodes,
+                                  const std::vector<uint64_t>& local_addrs,
+                                  const std::vector<uint64_t>& remote_addrs,
+                                  const std::vector<uint32_t>& rkeys,
+                                  const std::vector<uint64_t>& lengths);
+  std::vector<bool> batch_write_multi(
+      const std::vector<std::string>& node_ids,
+      const std::vector<uint64_t>& local_addrs,
+      const std::vector<uint64_t>& remote_addrs,
+      const std::vector<uint64_t>& lengths,
+      const std::map<std::string, std::vector<std::string>>& rail_endpoints,
+      const std::map<std::string, std::vector<uint32_t>>& rail_rkeys);
+
   // Rail-0 bootstrap endpoint (node identity) and the full per-rail list.
   std::string local_endpoint() const;
   std::vector<std::string> local_endpoints() const;
@@ -76,6 +90,9 @@ class TransferEngine {
   std::atomic<uint64_t> channel_discards_{0};
   std::atomic<uint64_t> read_wc_errors_{0};  // READs that completed with an error
   std::atomic<int> last_wc_status_{0};       // ibv_wc_status of the last such error
+  std::atomic<uint64_t> write_wc_errors_{0};
+  std::atomic<int> last_write_wc_status_{0};
+  std::atomic<uint64_t> write_timeouts_{0};
   std::atomic<uint64_t> local_reg_misses_{0};  // local dest not in a registered MR
   std::atomic<uint64_t> post_failures_{0};     // ibv_post_send rejected the WR
   std::atomic<uint64_t> lease_failures_{0};    // could not lease a channel to peer
