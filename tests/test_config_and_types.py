@@ -18,11 +18,17 @@ def test_config_valid_defaults():
     # single / auto-pick rail
     assert _cfg().device_rails() == [""]
     assert _cfg(device_name="mlx5_3").device_rails() == ["mlx5_3"]
+    assert _cfg(mode="centralized", role="storage").is_centralized()
+    assert _cfg(mode="centralized").effective_role() == "inference"
+    assert _cfg(mode="centralized").effective_role(for_storage_server=True) == "storage"
 
 
 @pytest.mark.parametrize("over", [
     {"protocol": "udp"},
     {"discovery_addr": "no-port"},
+    {"mode": "hybrid"},
+    {"role": "worker"},
+    {"mode": "p2p", "role": "storage"},
     {"ib_port": 0},
     {"ib_port": 999},
     {"gid_index": -2},

@@ -105,9 +105,13 @@ class NodeRuntime:
             control_port=control_port,
             rdma_host=rdma_host,
             rdma_port=int(rdma_port),
+            role=config.effective_role(for_storage_server=False),
         )
 
         self.ring = ConsistentHashRing(config.vnodes)
+        # In centralized mode the directory (and KV placement) is sharded across
+        # storage nodes only; inference nodes are clients.
+        self._data_ring = ConsistentHashRing(config.vnodes)
         self.discovery = DiscoveryClient(
             config.discovery_addr,
             self.info,
@@ -116,8 +120,9 @@ class NodeRuntime:
             meta_port=config.meta_port(),
             max_masters=config.max_masters,
         )
+        dir_ring = self._data_ring if config.is_centralized() else self.ring
         self.directory = DirectoryClient(
-            self.ring,
+            dir_ring,
             resolve_control=self.discovery.control_of,
             replicas=config.directory_replicas,
         )
@@ -128,16 +133,42 @@ class NodeRuntime:
         self._member_listeners.append(fn)
 
     def _on_members(self, members: List[NodeInfo]) -> None:
-        node_ids = [m.node_id for m in members]
-        changed = set(node_ids) != set(self.ring.nodes)
-        self.ring.set_nodes(node_ids)
-        logger.debug("peercache membership: %s", node_ids)
+        all_ids = [m.node_id for m in members]
+        storage_ids = [
+            m.node_id for m in members
+            if getattr(m, "role", "inference") == "storage"
+        ]
+        if self.config.is_centralized():
+            changed = set(storage_ids) != set(self._data_ring.nodes)
+            self._data_ring.set_nodes(storage_ids)
+            self.directory.set_ring(self._data_ring)
+            # Keep the full ring for diagnostics / future use.
+            self.ring.set_nodes(all_ids)
+        else:
+            changed = set(all_ids) != set(self.ring.nodes)
+            self.ring.set_nodes(all_ids)
+            self.directory.set_ring(self.ring)
+        logger.debug(
+            "peercache membership: all=%s storage=%s mode=%s",
+            all_ids, storage_ids, self.config.mode,
+        )
         if changed:
             for fn in self._member_listeners:
                 try:
                     fn(members)
                 except Exception as e:  # a listener must never break discovery
                     logger.debug("peercache: member listener failed: %s", e)
+
+    def data_owner(self, key: str) -> Optional[str]:
+        """Return the node_id that owns `key` in the current data/directory ring."""
+        ring = self._data_ring if self.config.is_centralized() else self.ring
+        return ring.get_node(key)
+
+    def storage_nodes(self) -> List[str]:
+        """Live storage node ids (centralized mode). Empty in p2p mode."""
+        if not self.config.is_centralized():
+            return []
+        return list(self._data_ring.nodes)
 
     def start(self) -> None:
         self.discovery.start()

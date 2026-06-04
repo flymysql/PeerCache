@@ -2,6 +2,14 @@
 
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.8.0] - 2026-06-04
+
+### Added
+- **Centralized mode (`mode=centralized`)** — dedicated KV cache servers via
+  `peercache-storage-server`; inference nodes use `"mode": "centralized",
+  "role": "inference"`. Writes via `data_ingest` RPC; reads via RDMA READ.
+  New config: `mode`, `role`; `NodeInfo.role`; `storage_nodes` metric.
+
 ## [0.7.1] - 2026-06-02
 
 ### Changed
