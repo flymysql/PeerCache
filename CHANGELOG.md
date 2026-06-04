@@ -6,6 +6,43 @@ All notable changes to PeerCache are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.8.2] - 2026-06-04
+
+### Added
+- **`write_policy` for hybrid mode** — configurable where hybrid inference nodes
+  publish: `local` (default, P2P-only even when storage servers exist), `storage`
+  (RDMA WRITE to storage only), or `both` (dual write: storage + local pool copy).
+
+## [0.8.1] - 2026-06-04
+
+### Added
+- **RDMA WRITE zero-copy storage writes** — centralized/hybrid inference nodes
+  reserve slots on storage servers (`data_prepare_writes`), push pages with
+  one-sided RDMA WRITE (`batch_write_multi` in C++), then commit directory
+  entries (`data_commit_writes`). RPC `data_ingest` remains as a fallback.
+- **`mode=hybrid`** — P2P inference nodes and storage servers coexist in one
+  cluster: hybrid nodes RDMA-WRITE to storage for cross-node sharing and keep
+  a local pool copy; pure `p2p` nodes behave as before. Directory lookups use
+  one ring across all nodes.
+
+### Changed
+- Directory is always sharded across **all** live nodes (P2P + storage share one
+  namespace); storage placement uses a separate storage ring.
+- Storage servers no longer require `mode=centralized` on the storage process.
+
+## [0.8.0] - 2026-06-04
+
+### Added
+- **Centralized mode (`mode=centralized`)** — PeerCache can run as a dedicated
+  distributed KV cache server in non-P2P deployments. Launch storage nodes with
+  `peercache-storage-server`; SGLang inference workers set
+  `"mode": "centralized", "role": "inference"`. KV bytes and directory shards live
+  on storage servers; writes go through the `data_ingest` RPC, reads stay
+  one-sided RDMA READ (same as P2P). New config keys: `mode`, `role`; new
+  `NodeInfo.role`; `storage_nodes` metrics gauge.
+- RPC JSON fallback now serialises `bytes` payloads (base64) so centralized
+  ingest works without optional msgpack.
+
 ## [0.7.1] - 2026-06-02
 
 ### Changed

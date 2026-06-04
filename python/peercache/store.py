@@ -231,11 +231,10 @@ class PeerCacheStore(HiCacheStorage):
         )
         self.runtime.control_rpc.register("data_promote", self._on_data_promote)
 
-        # Re-shard the directory when ring membership changes: the consistent-hash
-        # owner of a key can move when a node joins/leaves, and entries are not
-        # migrated automatically, so each producer re-publishes the locations of
-        # the pages it owns onto the (new) owners. Runs off the discovery thread.
-        self.runtime.add_member_listener(self._on_membership_change)
+        # Re-shard the directory when ring membership changes (P2P producers and
+        # centralized storage nodes only; inference clients have no local pool).
+        if not self.config.is_inference_client_only():
+            self.runtime.add_member_listener(self._on_membership_change)
 
     # ------------------------------------------------------------------ #
     # Registration
@@ -284,7 +283,12 @@ class PeerCacheStore(HiCacheStorage):
 
         Shared by the v1 (register_mem_pool_host) and v2 (register_mem_host_pool_v2)
         registration paths so PeerCache can publish regardless of which one SGLang
-        calls. Idempotent."""
+        calls. Idempotent.
+
+        In centralized mode inference nodes are clients only — KV bytes live on
+        storage servers, so no local published pool is created."""
+        if self.config.is_inference_client_only():
+            return
         if self._pool is not None:
             return
         capacity = max(1, self.config.global_segment_size // self.tp_size)
@@ -391,8 +395,10 @@ class PeerCacheStore(HiCacheStorage):
         m.set_gauge_provider("disk_capacity_bytes", lambda: self.config.disk_size if self._disk else 0)
         m.set_gauge_provider("disk_keys", lambda: self._disk.stats()[1] if self._disk else 0)
         m.set_gauge_provider("members", lambda: len(self.runtime.discovery.members()))
-        # Data-plane (transport) gauges: rails (NICs) and cumulative timeouts /
-        # channel discards surfaced from the C++ engine (0 on the TCP fallback).
+        m.set_gauge_provider(
+            "storage_nodes", lambda: len(self.runtime.storage_nodes())
+        )
+        # Data-plane (transport) gauges:
         def _tstat(key):
             try:
                 return self.runtime.transport.stats().get(key, 0)
@@ -417,6 +423,8 @@ class PeerCacheStore(HiCacheStorage):
         # MRs lazily registered for unregistered local READ destinations (the
         # generic batch_get path); converges once SGLang's host pages are seen.
         m.set_gauge_provider("rdma_lazy_local_mrs", lambda: _tstat("lazy_local_mrs"))
+        m.set_gauge_provider("rdma_write_wc_errors", lambda: _tstat("write_wc_errors"))
+        m.set_gauge_provider("rdma_write_timeouts", lambda: _tstat("write_timeouts"))
 
     # ------------------------------------------------------------------ #
     # Disk promote: load a key from disk back into the pool (makes it readable)
@@ -607,6 +615,168 @@ class PeerCacheStore(HiCacheStorage):
     # Core publish / fetch over component objects
     # ------------------------------------------------------------------ #
     def _publish(self, comp_keys: List[str], ptrs: List[int], sizes: List[int]) -> List[bool]:
+        mode = self.config.mode
+        if mode == "p2p":
+            return self._publish_p2p(comp_keys, ptrs, sizes)
+        if mode == "centralized":
+            return self._publish_storage(comp_keys, ptrs, sizes)
+        # hybrid: write_policy selects local / storage / both
+        policy = self.config.write_policy
+        has_storage = bool(self.runtime.storage_nodes())
+        if policy == "local" or not has_storage:
+            if policy in ("storage", "both") and not has_storage:
+                logger.warning(
+                    "peercache: hybrid write_policy=%s but no storage nodes registered; "
+                    "falling back to local publish", policy,
+                )
+            return self._publish_p2p(comp_keys, ptrs, sizes)
+        if policy == "storage":
+            return self._publish_storage(comp_keys, ptrs, sizes)
+        # both: storage tier for cross-node sharing + local copy (no extra dir PUT)
+        storage_res = self._publish_storage(comp_keys, ptrs, sizes)
+        local_res = self._publish_p2p(
+            comp_keys, ptrs, sizes, update_directory=False
+        )
+        return [bool(s or l) for s, l in zip(storage_res, local_res)]
+
+    def _publish_storage(
+        self, comp_keys: List[str], ptrs: List[int], sizes: List[int]
+    ) -> List[bool]:
+        """Push pages to a storage node via RDMA WRITE (zero-copy) or RPC fallback."""
+        t0 = time.perf_counter()
+        if not self.runtime.storage_nodes():
+            logger.warning("peercache: storage writes requested but no storage nodes registered")
+            return [False] * len(comp_keys)
+
+        existing = self.runtime.directory.exists(comp_keys)
+        results = [False] * len(comp_keys)
+        key_to_idx = {k: i for i, k in enumerate(comp_keys)}
+
+        # Group pending pages by target storage owner.
+        pending: Dict[str, List[dict]] = {}
+        for i, key in enumerate(comp_keys):
+            if existing[i]:
+                results[i] = True
+                continue
+            owner = self.runtime.data_owner(key)
+            if owner is None:
+                continue
+            pending.setdefault(owner, []).append(
+                {"key": key, "length": sizes[i], "local_ptr": ptrs[i], "idx": i}
+            )
+
+        published_bytes = 0
+        transport = self.runtime.transport
+
+        for owner, pages in pending.items():
+            endpoint = self.runtime.discovery.control_of(owner)
+            if endpoint is None:
+                continue
+            try:
+                prep = self._data_rpc.call(
+                    endpoint,
+                    "data_prepare_writes",
+                    {"pages": [{"key": p["key"], "length": p["length"]} for p in pages]},
+                )
+                slots = prep.get("slots") or []
+            except Exception as e:
+                logger.debug("peercache: data_prepare_writes to %s failed: %s", owner, e)
+                continue
+
+            # RDMA WRITE (or TCP write fallback) for each reserved slot.
+            w_nodes: List[str] = []
+            w_local: List[int] = []
+            w_remote: List[int] = []
+            w_len: List[int] = []
+            w_keys: List[str] = []
+            w_idx: List[int] = []
+            rail_eps: Dict[str, List[str]] = {}
+            rail_rks: Dict[str, List[int]] = {}
+
+            for page, slot in zip(pages, slots):
+                if not slot:
+                    continue
+                nk = slot["rdma_endpoint"]
+                if nk not in rail_eps:
+                    rail_eps[nk] = list(slot.get("rail_endpoints") or [nk])
+                    rail_rks[nk] = [int(x) for x in (slot.get("rail_rkeys") or [slot["rkey"]])]
+                w_nodes.append(nk)
+                w_local.append(page["local_ptr"])
+                w_remote.append(int(slot["remote_addr"]))
+                w_len.append(int(slot["length"]))
+                w_keys.append(page["key"])
+                w_idx.append(page["idx"])
+
+            write_ok: Dict[str, bool] = {}
+            if w_keys:
+                try:
+                    oks = transport.batch_write_multi(
+                        w_nodes, w_local, w_remote, w_len, rail_eps, rail_rks
+                    )
+                except Exception as e:
+                    logger.debug("peercache: batch_write_multi to %s failed: %s", owner, e)
+                    oks = [False] * len(w_keys)
+                commit_keys = [k for k, ok in zip(w_keys, oks) if ok]
+                for k, ok in zip(w_keys, oks):
+                    write_ok[k] = bool(ok)
+                if commit_keys:
+                    try:
+                        resp = self._data_rpc.call(
+                            endpoint, "data_commit_writes", {"keys": commit_keys}
+                        )
+                        committed = {
+                            k: v
+                            for k, v in zip(commit_keys, resp.get("ok") or [])
+                            if v
+                        }
+                    except Exception as e:
+                        logger.debug("peercache: data_commit_writes failed: %s", e)
+                        committed = {}
+                else:
+                    committed = {}
+            else:
+                committed = {}
+
+            for key, ok in write_ok.items():
+                if not ok or key not in committed:
+                    continue
+                idx = key_to_idx.get(key)
+                if idx is not None:
+                    results[idx] = True
+                    published_bytes += sizes[idx]
+
+            # RPC copy fallback for pages the data-plane write could not commit.
+            fallback = [
+                p for p in pages
+                if not results[p["idx"]]
+            ]
+            if fallback:
+                ingest_pages = [{
+                    "key": p["key"],
+                    "data": ctypes.string_at(p["local_ptr"], p["length"]),
+                } for p in fallback]
+                try:
+                    resp = self._data_rpc.call(
+                        endpoint, "data_ingest", {"pages": ingest_pages}
+                    )
+                    for p, ok in zip(fallback, resp.get("ok") or []):
+                        if ok:
+                            results[p["idx"]] = True
+                            published_bytes += p["length"]
+                except Exception as e:
+                    logger.debug("peercache: data_ingest fallback failed: %s", e)
+
+        self._metrics.record_write(published_bytes, time.perf_counter() - t0)
+        return results
+
+    def _publish_p2p(
+        self,
+        comp_keys: List[str],
+        ptrs: List[int],
+        sizes: List[int],
+        *,
+        update_directory: bool = True,
+    ) -> List[bool]:
         t0 = time.perf_counter()
         # Skip components already present in the directory (idempotent set).
         existing = self.runtime.directory.exists(comp_keys)
@@ -653,7 +823,7 @@ class PeerCacheStore(HiCacheStorage):
                 )
             else:
                 entries[key].remote_addr = al[0]
-        if entries:
+        if entries and update_directory:
             self.runtime.directory.put(entries)
         self._metrics.record_write(published_bytes, time.perf_counter() - t0)
         return results
@@ -757,6 +927,18 @@ class PeerCacheStore(HiCacheStorage):
                 continue
             if loc.length != sizes[i]:
                 continue  # size mismatch -> treat as miss
+            # Hybrid dual-write: prefer the local pool copy before READing storage.
+            if (
+                self.config.is_hybrid()
+                and self.config.write_policy == "both"
+                and self._pool is not None
+            ):
+                al = self._pool.address_of(comp_keys[i])
+                if al is not None and al[1] == sizes[i]:
+                    ctypes.memmove(ptrs[i], al[0], al[1])
+                    results[i] = True
+                    sources[i] = "local"
+                    continue
             if loc.node_id == self.config.node_id:
                 ctypes.memmove(ptrs[i], loc.remote_addr, loc.length)
                 results[i] = True

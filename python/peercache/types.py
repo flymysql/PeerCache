@@ -24,6 +24,9 @@ class NodeInfo:
     # RDMA QP-bootstrap endpoint (or TCP data-server endpoint in fallback mode).
     rdma_host: str
     rdma_port: int
+    # Node role in centralized mode: ``inference`` (SGLang worker) or
+    # ``storage`` (dedicated KV pool + directory shard). Ignored in p2p mode.
+    role: str = "inference"
 
     def rdma_endpoint(self) -> str:
         return f"{self.rdma_host}:{self.rdma_port}"
@@ -42,6 +45,7 @@ class NodeInfo:
             control_port=int(d["control_port"]),
             rdma_host=d["rdma_host"],
             rdma_port=int(d["rdma_port"]),
+            role=str(d.get("role", "inference")),
         )
 
 

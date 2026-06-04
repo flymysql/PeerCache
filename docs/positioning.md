@@ -21,8 +21,11 @@ across all nodes**; any node looks the key up and pulls the bytes with a
 - **Not a PD transfer engine.** It does not move the per-request prefill→decode
   KV handoff; that latency-critical GPU→GPU path is what Mooncake / NIXL do via
   `--disaggregation-transfer-backend`. PeerCache is orthogonal to it.
-- **Not a centralized store.** There is no master / metadata service to deploy
-  or scale.
+- **Not a centralized store (by default).** P2P mode has no master / managed data
+  pool. Set `mode=centralized` to run dedicated storage servers
+  (`peercache-storage-server`) that hold KV bytes and directory shards while
+  inference nodes are clients — a Mooncake Store–like layout without a separate
+  metadata master.
 
 ## Two orthogonal axes — don't conflate them
 
@@ -92,7 +95,8 @@ Being honest about the trade-offs of a fully decentralized design:
 - **Aggregated (non-PD) clusters with high prefix sharing** — system prompts,
   few-shot, multi-turn chat history, RAG documents, agent contexts. PeerCache is
   the complete shared-cache layer here: no transfer engine, just plug it in.
-- Teams that want **Mooncake-Store-like reuse without running a central master**.
+- Teams that want **Mooncake-Store-like reuse without running a central master**
+  (P2P mode), or who prefer **explicit storage servers** (`mode=centralized`).
 
 **Complementary**
 
@@ -113,7 +117,8 @@ Being honest about the trade-offs of a fully decentralized design:
 
 | Your situation | Recommendation |
 |---|---|
-| Want cross-node KV reuse, least complexity, no master | **PeerCache (aggregated mode)** |
+| Want cross-node KV reuse, least complexity, no master | **PeerCache P2P (aggregated mode)** |
+| Want dedicated KV pool servers, inference stays thin | **PeerCache centralized** (`peercache-storage-server` + `mode=centralized`) |
 | Need P/D physical split for scaling / SLO | Mooncake/NIXL for handoff **+ PeerCache on prefill** for reuse |
 | Need global placement, rich features, strong data HA | A mature centralized store |
 | Unique prompts, no shared prefixes | A KV reuse cache (any) won't help much |

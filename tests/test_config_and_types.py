@@ -18,11 +18,23 @@ def test_config_valid_defaults():
     # single / auto-pick rail
     assert _cfg().device_rails() == [""]
     assert _cfg(device_name="mlx5_3").device_rails() == ["mlx5_3"]
+    assert _cfg(mode="centralized", role="storage").is_centralized()
+    assert _cfg(mode="hybrid").is_hybrid()
+    assert _cfg(mode="hybrid").write_policy == "local"
+    assert _cfg(mode="hybrid", write_policy="both").uses_storage_writes()
+    assert not _cfg(mode="hybrid").uses_storage_writes()
+    assert _cfg(mode="hybrid", write_policy="storage").writes_local_pool() is False
+    assert _cfg(mode="hybrid", write_policy="both").writes_local_pool()
+    assert _cfg(mode="centralized").effective_role() == "inference"
+    assert _cfg(mode="centralized").effective_role(for_storage_server=True) == "storage"
 
 
 @pytest.mark.parametrize("over", [
     {"protocol": "udp"},
     {"discovery_addr": "no-port"},
+    {"mode": "legacy"},
+    {"write_policy": "dual"},
+    {"role": "worker"},
     {"ib_port": 0},
     {"ib_port": 999},
     {"gid_index": -2},

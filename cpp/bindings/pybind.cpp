@@ -27,6 +27,7 @@ PYBIND11_MODULE(_peercache, m) {
 using peercache::MrHandle;
 using peercache::ReadRequest;
 using peercache::TransferEngine;
+using peercache::WriteRequest;
 
 PYBIND11_MODULE(_peercache, m) {
   m.doc() = "PeerCache C++ data plane (raw libibverbs one-sided RDMA)";
@@ -58,6 +59,26 @@ PYBIND11_MODULE(_peercache, m) {
       .def_readwrite("rkey", &ReadRequest::rkey)
       .def_readwrite("length", &ReadRequest::length);
 
+  py::class_<WriteRequest>(m, "WriteRequest")
+      .def(py::init<>())
+      .def(py::init([](const std::string& node, uint64_t local_addr,
+                       uint64_t remote_addr, uint32_t rkey, uint64_t length) {
+             WriteRequest w;
+             w.remote_node = node;
+             w.local_addr = local_addr;
+             w.remote_addr = remote_addr;
+             w.rkey = rkey;
+             w.length = length;
+             return w;
+           }),
+           py::arg("remote_node"), py::arg("local_addr"), py::arg("remote_addr"),
+           py::arg("rkey"), py::arg("length"))
+      .def_readwrite("remote_node", &WriteRequest::remote_node)
+      .def_readwrite("local_addr", &WriteRequest::local_addr)
+      .def_readwrite("remote_addr", &WriteRequest::remote_addr)
+      .def_readwrite("rkey", &WriteRequest::rkey)
+      .def_readwrite("length", &WriteRequest::length);
+
   py::class_<TransferEngine>(m, "TransferEngine")
       .def(py::init<const std::vector<std::string>&, uint8_t, int,
                     const std::string&, uint16_t, size_t>(),
@@ -78,6 +99,14 @@ PYBIND11_MODULE(_peercache, m) {
            py::arg("remote_addrs"), py::arg("rkeys"), py::arg("lengths"),
            py::call_guard<py::gil_scoped_release>())
       .def("batch_read_multi", &TransferEngine::batch_read_multi,
+           py::arg("node_ids"), py::arg("local_addrs"), py::arg("remote_addrs"),
+           py::arg("lengths"), py::arg("rail_endpoints"), py::arg("rail_rkeys"),
+           py::call_guard<py::gil_scoped_release>())
+      .def("batch_write_v", &TransferEngine::batch_write_v,
+           py::arg("remote_nodes"), py::arg("local_addrs"),
+           py::arg("remote_addrs"), py::arg("rkeys"), py::arg("lengths"),
+           py::call_guard<py::gil_scoped_release>())
+      .def("batch_write_multi", &TransferEngine::batch_write_multi,
            py::arg("node_ids"), py::arg("local_addrs"), py::arg("remote_addrs"),
            py::arg("lengths"), py::arg("rail_endpoints"), py::arg("rail_rkeys"),
            py::call_guard<py::gil_scoped_release>())
