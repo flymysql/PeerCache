@@ -2,6 +2,14 @@
 
 本项目遵循 [语义化版本](https://semver.org/)。
 
+## [0.8.0] - 2026-06-04
+
+### 新增
+- **中心化模式(`mode=centralized`)** — 通过 `peercache-storage-server` 运行专用
+  KV 缓存服务器;推理节点设 `"mode": "centralized", "role": "inference"`。写入经
+  `data_ingest` RPC;读取仍为 RDMA READ。新增配置 `mode`、`role`;`NodeInfo.role`;
+  `storage_nodes` 指标。
+
 ## [0.7.1] - 2026-06-02
 
 ### 变更

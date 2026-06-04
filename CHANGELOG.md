@@ -6,6 +6,19 @@ All notable changes to PeerCache are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-06-04
+
+### Added
+- **Centralized mode (`mode=centralized`)** — PeerCache can run as a dedicated
+  distributed KV cache server in non-P2P deployments. Launch storage nodes with
+  `peercache-storage-server`; SGLang inference workers set
+  `"mode": "centralized", "role": "inference"`. KV bytes and directory shards live
+  on storage servers; writes go through the `data_ingest` RPC, reads stay
+  one-sided RDMA READ (same as P2P). New config keys: `mode`, `role`; new
+  `NodeInfo.role`; `storage_nodes` metrics gauge.
+- RPC JSON fallback now serialises `bytes` payloads (base64) so centralized
+  ingest works without optional msgpack.
+
 ## [0.7.1] - 2026-06-02
 
 ### Changed

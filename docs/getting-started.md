@@ -86,6 +86,57 @@ python -m sglang.launch_server \
 > (NVMe). Set `"disk_enabled": false` to keep everything in the memory pool only.
 > Total capacity per node ≈ `global_segment_size` (RAM) + `disk_size` (disk).
 
+## 3. Centralized mode (optional — dedicated KV cache servers)
+
+By default PeerCache is **P2P**: each SGLang node publishes KV into its own local
+pool and peers RDMA-read from the producer. Set `"mode": "centralized"` when you
+want **dedicated storage servers** that hold the KV bytes and directory shards,
+similar to a Mooncake Store–style layout, while inference nodes stay thin clients.
+
+**Topology**
+
+1. Launch one or more storage servers (no SGLang required):
+
+```bash
+peercache-storage-server \
+  --discovery-addr NODE0_IP:31998 \
+  --global-segment-size 64gb \
+  --disk-path /data/peercache/ \
+  --protocol rdma \
+  --device-names mlx5_bond_1,mlx5_bond_2
+```
+
+2. Launch SGLang inference workers with centralized client config:
+
+```bash
+python -m sglang.launch_server \
+  ... \
+  --hicache-storage-backend-extra-config '{
+    "backend_name": "peercache",
+    "module_path":  "peercache.store",
+    "class_name":   "PeerCacheStore",
+    "discovery_addr": "NODE0_IP:31998",
+    "mode": "centralized",
+    "role": "inference",
+    "protocol": "rdma",
+    "device_name": "mlx5_0"
+  }'
+```
+
+**How it differs from P2P**
+
+| | **P2P (default)** | **Centralized** |
+|---|---|---|
+| KV bytes | Stay on the producing inference node | Live on **storage servers** |
+| Directory | Sharded across **all** nodes | Sharded across **storage nodes only** |
+| Write path | Local memcpy + tiny directory PUT | RPC `data_ingest` to the owning storage node |
+| Read path | One-sided RDMA READ (unchanged) | One-sided RDMA READ from storage |
+| Extra process | None | `peercache-storage-server` per storage host |
+
+Inference nodes do **not** allocate a local published pool in centralized mode;
+size `global_segment_size` on storage servers instead. Discovery is unchanged —
+storage and inference nodes share the same `discovery_addr`.
+
 ## Deployment topology (PD disaggregation)
 
 A typical PD-disaggregated cluster:
@@ -129,6 +180,13 @@ Required keys (the dynamic-backend factory needs the first three):
 | `module_path` | — | `peercache.store` (required) |
 | `class_name` | — | `PeerCacheStore` (required) |
 | `discovery_addr` | — | bootstrap head `host:port` (or a comma-separated seed list), **same on all nodes**; the head is pinned as the primary discovery master, every host runs a master (**required**) |
+
+Deployment mode:
+
+| key | default | meaning |
+|---|---|---|
+| `mode` | `p2p` | `p2p` (decentralized, KV on producer) or `centralized` (dedicated storage servers) |
+| `role` | `auto` | `inference` (SGLang client), `storage` (KV server — use `peercache-storage-server`), or `auto` (infer from process) |
 
 RDMA / transport:
 

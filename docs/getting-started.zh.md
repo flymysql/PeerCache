@@ -78,6 +78,25 @@ python -m sglang.launch_server \
 > `node_id` 子目录);建议指向一块大而快的本地盘(NVMe)。设 `"disk_enabled": false`
 > 可只用内存池。每节点总容量 ≈ `global_segment_size`(内存) + `disk_size`(磁盘)。
 
+## 3. 中心化模式(可选 — 专用 KV 缓存服务器)
+
+默认 PeerCache 为 **P2P**:每个 SGLang 节点把 KV 发布到本地池,其他节点从生产者
+RDMA 读取。若希望 KV 字节和目录分片由**专用存储节点**托管(类似 Mooncake Store
+布局),推理节点只做客户端,请设置 `"mode": "centralized"`。
+
+1. 启动存储服务器(无需 SGLang):
+
+```bash
+peercache-storage-server \
+  --discovery-addr NODE0_IP:31998 \
+  --global-segment-size 64gb \
+  --disk-path /data/peercache/
+```
+
+2. SGLang 推理节点增加 `"mode": "centralized", "role": "inference"`。
+
+写入走 `data_ingest` RPC;读取仍为 RDMA READ。中心化模式下推理节点不分配本地 published pool。
+
 ## 部署拓扑（PD 分离）
 
 一个典型的 PD 分离集群：

@@ -231,11 +231,10 @@ class PeerCacheStore(HiCacheStorage):
         )
         self.runtime.control_rpc.register("data_promote", self._on_data_promote)
 
-        # Re-shard the directory when ring membership changes: the consistent-hash
-        # owner of a key can move when a node joins/leaves, and entries are not
-        # migrated automatically, so each producer re-publishes the locations of
-        # the pages it owns onto the (new) owners. Runs off the discovery thread.
-        self.runtime.add_member_listener(self._on_membership_change)
+        # Re-shard the directory when ring membership changes (P2P producers and
+        # centralized storage nodes only; inference clients have no local pool).
+        if not (self.config.is_centralized() and self.config.effective_role() == "inference"):
+            self.runtime.add_member_listener(self._on_membership_change)
 
     # ------------------------------------------------------------------ #
     # Registration
@@ -284,7 +283,12 @@ class PeerCacheStore(HiCacheStorage):
 
         Shared by the v1 (register_mem_pool_host) and v2 (register_mem_host_pool_v2)
         registration paths so PeerCache can publish regardless of which one SGLang
-        calls. Idempotent."""
+        calls. Idempotent.
+
+        In centralized mode inference nodes are clients only — KV bytes live on
+        storage servers, so no local published pool is created."""
+        if self.config.is_centralized() and self.config.effective_role() == "inference":
+            return
         if self._pool is not None:
             return
         capacity = max(1, self.config.global_segment_size // self.tp_size)
@@ -391,8 +395,10 @@ class PeerCacheStore(HiCacheStorage):
         m.set_gauge_provider("disk_capacity_bytes", lambda: self.config.disk_size if self._disk else 0)
         m.set_gauge_provider("disk_keys", lambda: self._disk.stats()[1] if self._disk else 0)
         m.set_gauge_provider("members", lambda: len(self.runtime.discovery.members()))
-        # Data-plane (transport) gauges: rails (NICs) and cumulative timeouts /
-        # channel discards surfaced from the C++ engine (0 on the TCP fallback).
+        m.set_gauge_provider(
+            "storage_nodes", lambda: len(self.runtime.storage_nodes())
+        )
+        # Data-plane (transport) gauges:
         def _tstat(key):
             try:
                 return self.runtime.transport.stats().get(key, 0)
@@ -607,6 +613,59 @@ class PeerCacheStore(HiCacheStorage):
     # Core publish / fetch over component objects
     # ------------------------------------------------------------------ #
     def _publish(self, comp_keys: List[str], ptrs: List[int], sizes: List[int]) -> List[bool]:
+        if self.config.is_centralized():
+            return self._publish_centralized(comp_keys, ptrs, sizes)
+        return self._publish_p2p(comp_keys, ptrs, sizes)
+
+    def _publish_centralized(
+        self, comp_keys: List[str], ptrs: List[int], sizes: List[int]
+    ) -> List[bool]:
+        """Push pages to the storage node that owns each key's directory shard."""
+        t0 = time.perf_counter()
+        if not self.runtime.storage_nodes():
+            logger.warning(
+                "peercache: centralized mode but no storage nodes registered yet"
+            )
+            return [False] * len(comp_keys)
+
+        existing = self.runtime.directory.exists(comp_keys)
+        results = [False] * len(comp_keys)
+        pages_by_owner: Dict[str, List[dict]] = {}
+        key_to_idx: Dict[str, int] = {}
+
+        for i, key in enumerate(comp_keys):
+            if existing[i]:
+                results[i] = True
+                continue
+            owner = self.runtime.data_owner(key)
+            if owner is None:
+                continue
+            key_to_idx[key] = i
+            data = ctypes.string_at(ptrs[i], sizes[i])
+            pages_by_owner.setdefault(owner, []).append({"key": key, "data": data})
+
+        published_bytes = 0
+        for owner, pages in pages_by_owner.items():
+            endpoint = self.runtime.discovery.control_of(owner)
+            if endpoint is None:
+                continue
+            try:
+                resp = self._data_rpc.call(endpoint, "data_ingest", {"pages": pages})
+                oks = resp.get("ok", [])
+            except Exception as e:
+                logger.debug("peercache: data_ingest to %s failed: %s", owner, e)
+                continue
+            for page, ok in zip(pages, oks):
+                idx = key_to_idx.get(page["key"])
+                if idx is not None:
+                    results[idx] = bool(ok)
+                    if ok:
+                        published_bytes += sizes[idx]
+
+        self._metrics.record_write(published_bytes, time.perf_counter() - t0)
+        return results
+
+    def _publish_p2p(self, comp_keys: List[str], ptrs: List[int], sizes: List[int]) -> List[bool]:
         t0 = time.perf_counter()
         # Skip components already present in the directory (idempotent set).
         existing = self.runtime.directory.exists(comp_keys)

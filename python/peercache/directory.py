@@ -78,6 +78,10 @@ class DirectoryClient:
         self._replicas = max(1, replicas)
         self._pool = pool or RpcClientPool()
 
+    def set_ring(self, ring: ConsistentHashRing) -> None:
+        """Point directory routing at a new ring (e.g. storage-only in centralized mode)."""
+        self._ring = ring
+
     def _owners(self, key: str) -> List[str]:
         if self._replicas == 1:
             node = self._ring.get_node(key)

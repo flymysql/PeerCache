@@ -4,7 +4,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "peercache"
-version = "0.7.1"
+version = "0.8.0"
 description = "Peer-to-peer RDMA zero-copy L3 KV-cache backend for SGLang HiCache"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -21,6 +21,7 @@ bench = ["mooncake-transfer-engine"]
 
 [project.scripts]
 peercache-meta = "peercache.examples.launch_meta:main"
+peercache-storage-server = "peercache.examples.launch_storage:main"
 peercache-bench = "peercache.bench.cli:main"
 
 [tool.scikit-build]
