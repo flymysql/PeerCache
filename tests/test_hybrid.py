@@ -58,25 +58,28 @@ def _storage_cfg(discovery_addr, node_id):
     )
 
 
-def _infer_cfg(discovery_addr, node_id, mode="p2p"):
+def _infer_cfg(discovery_addr, node_id, mode="p2p", write_policy="local"):
+    extra = {
+        "discovery_addr": discovery_addr,
+        "mode": mode,
+        "protocol": "tcp",
+        "local_hostname": "127.0.0.1",
+        "node_id": node_id,
+        "heartbeat_interval": 0.2,
+        "member_ttl": 30.0,
+        "global_segment_size": 1 << 20,
+        "metrics_enabled": False,
+        "disk_enabled": False,
+    }
+    if mode == "hybrid":
+        extra["write_policy"] = write_policy
     return SimpleNamespace(
         tp_rank=0,
         tp_size=1,
         pp_rank=0,
         pp_size=1,
         is_mla_model=True,
-        extra_config={
-            "discovery_addr": discovery_addr,
-            "mode": mode,
-            "protocol": "tcp",
-            "local_hostname": "127.0.0.1",
-            "node_id": node_id,
-            "heartbeat_interval": 0.2,
-            "member_ttl": 30.0,
-            "global_segment_size": 1 << 20,
-            "metrics_enabled": False,
-            "disk_enabled": False,
-        },
+        extra_config=extra,
     )
 
 
@@ -106,7 +109,9 @@ def hybrid_cluster():
     storage = StorageServer(_storage_cfg(addr, "storage-1"))
     storage.start()
     p2p = PeerCacheStore(_infer_cfg(addr, "p2p-A", mode="p2p"))
-    hybrid = PeerCacheStore(_infer_cfg(addr, "hybrid-B", mode="hybrid"))
+    hybrid = PeerCacheStore(
+        _infer_cfg(addr, "hybrid-B", mode="hybrid", write_policy="both")
+    )
     try:
         _wait_ring(p2p.runtime, 3)
         _wait_storage(p2p.runtime, 1)
@@ -146,3 +151,68 @@ def test_p2p_and_hybrid_coexist(hybrid_cluster):
     host_h = FakeMemPoolHost(page, npages)
     hybrid.register_mem_pool_host(host_h)
     assert hybrid.batch_get_v1([f"p2p{i}" for i in range(npages)], list(range(npages))) == [True] * npages
+
+
+@pytest.fixture
+def hybrid_local_cluster():
+    meta = DiscoveryServer("127.0.0.1", 0)
+    port = meta.start()
+    addr = f"127.0.0.1:{port}"
+    storage = StorageServer(_storage_cfg(addr, "storage-1"))
+    storage.start()
+    hybrid = PeerCacheStore(_infer_cfg(addr, "hybrid-local", mode="hybrid"))
+    reader = PeerCacheStore(_infer_cfg(addr, "hybrid-reader", mode="hybrid"))
+    try:
+        _wait_ring(hybrid.runtime, 3)
+        _wait_storage(hybrid.runtime, 1)
+        yield storage, hybrid, reader
+    finally:
+        reader.close()
+        hybrid.close()
+        storage.stop()
+        meta.stop()
+
+
+def test_hybrid_default_write_policy_local(hybrid_local_cluster):
+    """Default hybrid write_policy=local: P2P publish only, storage stays empty."""
+    storage, hybrid, reader = hybrid_local_cluster
+    assert hybrid.config.write_policy == "local"
+    page, npages = 128, 3
+    host = FakeMemPoolHost(page, npages)
+    hybrid.register_mem_pool_host(host)
+    reader.register_mem_pool_host(FakeMemPoolHost(page, npages))
+    keys = [f"loc{i}" for i in range(npages)]
+    for i in range(npages):
+        seg = host.page_bytes_at(i)
+        for j in range(page):
+            seg[j] = (i + j) % 251
+    assert hybrid.batch_set_v1(keys, list(range(npages))) == [True] * npages
+    assert len(storage._pool) == 0
+    assert reader.batch_get_v1(keys, list(range(npages))) == [True] * npages
+
+
+def test_hybrid_write_policy_storage(hybrid_cluster):
+    storage, p2p, hybrid = hybrid_cluster
+    page, npages = 128, 3
+    store = PeerCacheStore(
+        _infer_cfg(
+            p2p.config.discovery_addr, "hybrid-storage-only", mode="hybrid",
+            write_policy="storage",
+        )
+    )
+    try:
+        _wait_ring(store.runtime, 4)
+        host = FakeMemPoolHost(page, npages)
+        store.register_mem_pool_host(host)
+        reader = FakeMemPoolHost(page, npages)
+        p2p.register_mem_pool_host(reader)
+        keys = [f"st{i}" for i in range(npages)]
+        for i in range(npages):
+            seg = host.page_bytes_at(i)
+            for j in range(page):
+                seg[j] = (i * 5 + j) % 251
+        assert store.batch_set_v1(keys, list(range(npages))) == [True] * npages
+        assert len(storage._pool) == npages
+        assert p2p.batch_get_v1(keys, list(range(npages))) == [True] * npages
+    finally:
+        store.close()
