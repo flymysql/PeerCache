@@ -2,6 +2,29 @@
 
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.8.2] - 2026-06-04
+
+### Added
+- Hybrid **`write_policy`**: `local` (default), `storage`, or `both`.
+
+## [0.8.1] - 2026-06-04
+
+### Added
+- RDMA WRITE zero-copy path to storage servers (`data_prepare_writes` →
+  `batch_write_multi` → `data_commit_writes`); RPC ingest fallback retained.
+- `mode=hybrid` for P2P + storage servers in one cluster.
+
+### Changed
+- Unified directory ring across all nodes; storage placement uses a storage ring.
+
+## [0.8.0] - 2026-06-04
+
+### Added
+- **Centralized mode (`mode=centralized`)** — dedicated KV cache servers via
+  `peercache-storage-server`; inference nodes use `"mode": "centralized",
+  "role": "inference"`. Writes via `data_ingest` RPC; reads via RDMA READ.
+  New config: `mode`, `role`; `NodeInfo.role`; `storage_nodes` metric.
+
 ## [0.7.1] - 2026-06-02
 
 ### Changed

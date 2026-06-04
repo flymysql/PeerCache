@@ -17,7 +17,9 @@ PeerCache 是一个**去中心化、点对点、RDMA 零拷贝的 SGLang L3(HiCa
 
 - **不是 PD 搬运引擎**。它不负责每个请求的 prefill→decode KV 交接——那条延迟敏感的 GPU→GPU
   路径是 Mooncake / NIXL 通过 `--disaggregation-transfer-backend` 干的。PeerCache 与之正交。
-- **不是中心化存储**。没有需要部署/扩容的 master / 元数据服务。
+- **默认不是中心化存储(P2P 模式)**。没有 master / 托管数据池。设置
+  `mode=centralized` 可运行专用存储服务器(`peercache-storage-server`),由存储节点
+  托管 KV 与目录分片,推理节点为客户端 —— 类似 Mooncake Store,但无需独立元数据 master。
 
 ## 两个正交的维度——别混
 

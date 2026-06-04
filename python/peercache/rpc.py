@@ -22,13 +22,26 @@ try:  # optional faster/compact codec
         return msgpack.unpackb(buf, raw=False)
 
 except Exception:  # pragma: no cover - fallback path
+    import base64
     import json
 
+    class _BytesEncoder(json.JSONEncoder):
+        def default(self, obj):
+            if isinstance(obj, (bytes, bytearray, memoryview)):
+                raw = bytes(obj)
+                return {"__b64__": base64.b64encode(raw).decode("ascii")}
+            return super().default(obj)
+
+    def _json_hook(obj):
+        if isinstance(obj, dict) and set(obj.keys()) == {"__b64__"}:
+            return base64.b64decode(obj["__b64__"])
+        return obj
+
     def _dumps(obj: Any) -> bytes:
-        return json.dumps(obj).encode("utf-8")
+        return json.dumps(obj, cls=_BytesEncoder).encode("utf-8")
 
     def _loads(buf: bytes) -> Any:
-        return json.loads(buf.decode("utf-8"))
+        return json.loads(buf.decode("utf-8"), object_hook=_json_hook)
 
 
 def _recv_exact(sock: socket.socket, n: int) -> Optional[bytes]:
