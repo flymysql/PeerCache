@@ -110,6 +110,13 @@ class PeerCacheConfig:
     # Node identity; auto-generated if not provided.
     node_id: str = ""
 
+    # Optional keyspace prefix to isolate tenants / models sharing one cluster
+    # (mirrors Mooncake's config_prefix: extra_backend_tag + model_name). When
+    # set, every key published to the directory and disk tier is namespaced
+    # with "<prefix>_" so two sglang deployments on one PeerCache cluster can
+    # never collide. All nodes of one deployment must use the same prefix.
+    prefix: str = ""
+
     # Heartbeat / membership refresh interval (seconds).
     heartbeat_interval: float = 2.0
     member_ttl: float = 6.0
@@ -293,6 +300,7 @@ class PeerCacheConfig:
             "metrics_port",
             "metrics_dashboard",
             "node_id",
+            "prefix",
             "heartbeat_interval",
             "member_ttl",
             "max_masters",
@@ -313,3 +321,4 @@ def _resolve_local_ip(peer_addr: str) -> str:
             s.close()
     except Exception:
         return socket.gethostbyname(socket.gethostname())
+
