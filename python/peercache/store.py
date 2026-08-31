@@ -114,8 +114,20 @@ class PeerCacheStore(HiCacheStorage):
         extra_config = {}
         if storage_config is not None and getattr(storage_config, "extra_config", None):
             extra_config.update(storage_config.extra_config)
-        if extra:
-            extra_config.update(extra)
+        # `extra` is normally a dict of extra config. Some sglang builtin
+        # backend paths call `backend_class(storage_config, mem_pool_host)`
+        # positionally (like mooncake); tolerate a non-dict there so the
+        # builtin registration works unchanged. The mem pool host is picked up
+        # later via register_mem_pool_host() anyway.
+        if extra is not None:
+            if isinstance(extra, dict):
+                extra_config.update(extra)
+            else:
+                logger.debug(
+                    "peercache: ignoring non-dict extra arg (%s); "
+                    "host pool arrives via register_mem_pool_host()",
+                    type(extra).__name__,
+                )
 
         self.config = PeerCacheConfig.from_extra_config(extra_config)
         self.storage_config = storage_config
@@ -320,7 +332,7 @@ class PeerCacheStore(HiCacheStorage):
         Must do everything v1 does for the KV pool -- set mem_pool_host, register
         the recv MR, and create the published pool -- otherwise PeerCache has no
         pool to publish into and silently does nothing (pool_capacity_bytes=0)."""
-        self.registered_pools[host_pool_name] = host_pool
+        self.registered_pools[str(host_pool_name)] = host_pool
         if str(host_pool_name) in (str(PoolName.KV), "kv"):
             self.mem_pool_host = host_pool
             self._register_recv(host_pool)
@@ -520,8 +532,22 @@ class PeerCacheStore(HiCacheStorage):
     # ------------------------------------------------------------------ #
     # Key suffixing (mirrors Mooncake MHA k/v split and MLA single-key)
     # ------------------------------------------------------------------ #
+    def _tag_keys(self, keys: List[str]) -> List[str]:
+        """Apply the optional keyspace prefix (tenant/model isolation).
+
+        Mirrors Mooncake's `_tag_keys`: when `config.prefix` is set, every
+        logical key is namespaced as `<prefix>_<key>` before any suffixing, so
+        two sglang deployments sharing one PeerCache cluster never collide.
+        All nodes of a deployment must configure the same prefix.
+        """
+        if not self.config.prefix:
+            return list(keys)
+        p = self.config.prefix
+        return [f"{p}_{k}" for k in keys]
+
     def _component_keys(self, keys: List[str]):
         """Return (component_keys, multiplier) aligned with get_page_buffer_meta."""
+        keys = self._tag_keys(keys)
         out: List[str] = []
         if self.is_mla:
             for k in keys:
@@ -1036,15 +1062,96 @@ class PeerCacheStore(HiCacheStorage):
     def _v2_host_pool(self, name):
         if str(name) in (str(PoolName.KV), "kv"):
             return self.mem_pool_host
-        return self.registered_pools.get(name)
+        return self.registered_pools.get(str(name))
 
     def _v2_component_keys(self, transfer):
         keys = transfer.keys or []
         if str(transfer.name) in (str(PoolName.KV), "kv"):
             return self._component_keys(keys)
+        keys = self._tag_keys(keys)
         # Extra pools: one storage object per page, tagged by pool + tp suffix.
-        suffix = f"_{self.mha_suffix}_{transfer.name}"
+        # Special-case DRAFT: the draft model's MLA/MHA layout is independent
+        # from the target (e.g. EAGLE-MHA draft on an MLA target), so the
+        # suffix scheme follows the draft pool's own class (mirrors mooncake):
+        #   MLA draft      -> single component  _{rank}_draft_k
+        #   MHA draft      -> K/V components    _{rank}_draft_k + _{rank}_draft_v
+        # Other sidecar pools (MAMBA/SWA/INDEXER/DeepSeek-V4) are single
+        # page-packed objects: _{rank}_{pool}.
+        name = str(transfer.name)
+        if name in ("draft", "draft_mla") or name == str(getattr(PoolName, "DRAFT", "draft")):
+            draft_pool = self.registered_pools.get(name) or self.registered_pools.get(
+                "draft"
+            )
+            is_mla_draft = draft_pool is not None and not hasattr(
+                draft_pool, "v_buffer"
+            )
+            if is_mla_draft:
+                suffix = f"_{self.mla_suffix}_draft_k"
+                return [f"{k}{suffix}" for k in keys], 1
+            suffix_k = f"_{self.mha_suffix}_draft_k"
+            suffix_v = f"_{self.mha_suffix}_draft_v"
+            out = []
+            for k in keys:
+                out.append(f"{k}{suffix_k}")
+                out.append(f"{k}{suffix_v}")
+            return out, 2
+        suffix = f"_{self.mha_suffix}_{name}"
         return [f"{k}{suffix}" for k in keys], 1
+
+    def _pack_multi_buffer(
+        self, comp_keys, ptrs, sizes, keepalive
+    ):
+        """DeepSeek-V4 style pools: one logical page = N host buffers.
+
+        mooncake packs them with `_pack_multi_buffer_meta`; PeerCache stores
+        one blob per key, so the N buffers of a page are concatenated into a
+        single published blob (read back then scatter into the buffers).
+        Returns (packed_ptrs, packed_sizes) with one entry per comp_key.
+        """
+        if len(ptrs) == len(comp_keys):
+            return ptrs, sizes
+        assert len(ptrs) % len(comp_keys) == 0, (
+            "multi-buffer meta mismatch: %d buffers for %d keys"
+            % (len(ptrs), len(comp_keys))
+        )
+        nbuf = len(ptrs) // len(comp_keys)
+        packed_ptrs, packed_sizes = [], []
+        for i in range(len(comp_keys)):
+            chunk = ptrs[i * nbuf:(i + 1) * nbuf]
+            chunk_sizes = sizes[i * nbuf:(i + 1) * nbuf]
+            total = sum(chunk_sizes)
+            buf = (ctypes.c_byte * total)()
+            off = 0
+            for p, sz in zip(chunk, chunk_sizes):
+                ctypes.memmove(ctypes.addressof(buf) + off, p, sz)
+                off += sz
+            keepalive.append(buf)
+            packed_ptrs.append(ctypes.addressof(buf))
+            packed_sizes.append(total)
+        return packed_ptrs, packed_sizes
+
+    def _scatter_multi_buffer(
+        self, comp_keys, ptrs, sizes, keepalive, results
+    ):
+        """Inverse of _pack_multi_buffer: copy a fetched blob back into the
+        per-page host buffers after a multi-buffer get. `keepalive` holds the
+        packed blobs (in comp_keys order) that `_fetch` wrote into."""
+        if len(ptrs) == len(comp_keys):
+            return
+        nbuf = len(ptrs) // len(comp_keys)
+        for i, key in enumerate(comp_keys):
+            if not results[i]:
+                continue
+            if i >= len(keepalive):
+                results[i] = False
+                continue
+            src = keepalive[i]
+            chunk = ptrs[i * nbuf:(i + 1) * nbuf]
+            chunk_sizes = sizes[i * nbuf:(i + 1) * nbuf]
+            off = 0
+            for p, sz in zip(chunk, chunk_sizes):
+                ctypes.memmove(p, ctypes.addressof(src) + off, sz)
+                off += sz
 
     def batch_set_v2(self, transfers, extra_info=None) -> dict:
         results: dict = {}
@@ -1052,7 +1159,9 @@ class PeerCacheStore(HiCacheStorage):
             host_pool = self._v2_host_pool(t.name)
             comp_keys, mult = self._v2_component_keys(t)
             ptrs, sizes = host_pool.get_page_buffer_meta(t.host_indices)
-            comp = self._publish(comp_keys, ptrs, sizes)
+            keepalive: list = []
+            p_ptrs, p_sizes = self._pack_multi_buffer(comp_keys, ptrs, sizes, keepalive)
+            comp = self._publish(comp_keys, p_ptrs, p_sizes)
             results[t.name] = self._page_results(comp, mult)
         return results
 
@@ -1062,15 +1171,37 @@ class PeerCacheStore(HiCacheStorage):
             host_pool = self._v2_host_pool(t.name)
             comp_keys, mult = self._v2_component_keys(t)
             ptrs, sizes = host_pool.get_page_buffer_meta(t.host_indices)
-            comp = self._fetch(comp_keys, ptrs, sizes)
+            keepalive: list = []
+            p_ptrs, p_sizes = self._pack_multi_buffer(comp_keys, ptrs, sizes, keepalive)
+            comp = self._fetch(comp_keys, p_ptrs, p_sizes)
+            # Scatter fetched blobs back into the per-page host buffers.
+            self._scatter_multi_buffer(comp_keys, ptrs, sizes, keepalive, comp)
             results[t.name] = self._page_results(comp, mult)
         return results
 
     def batch_exists_v2(self, keys, pool_transfers=None, extra_info=None):
-        from sglang.srt.mem_cache.hicache_storage import (  # lazy import
-            PoolHitPolicy,
-            PoolTransferResult,
-        )
+        # Lazy import with graceful fallback: sglang releases differ in whether
+        # they export PoolHitPolicy / PoolTransferResult (0.5.9 predates the v2
+        # interface; main adds it). PeerCache must work against both.
+        try:
+            from sglang.srt.mem_cache.hicache_storage import (
+                PoolHitPolicy,
+                PoolTransferResult,
+            )
+        except Exception:
+            class _PoolHitPolicy:
+                ALL_PAGES = "all_pages"
+                TRAILING_PAGES = "trailing_pages"
+            PoolHitPolicy = _PoolHitPolicy
+
+            class PoolTransferResult:
+                def __init__(self, kv_hit_pages, extra_pool_hit_pages=None):
+                    self.kv_hit_pages = kv_hit_pages
+                    self.extra_pool_hit_pages = extra_pool_hit_pages or {}
+                # Alias for older callers that read .prefix_keys
+                @property
+                def prefix_keys(self):
+                    return self.kv_hit_pages
 
         kv_pages = self.batch_exists(keys, extra_info)
         hit_count = {PoolName.KV: kv_pages} if kv_pages else {}
@@ -1092,14 +1223,13 @@ class PeerCacheStore(HiCacheStorage):
                     (i for i in range(kv_pages) if not page_exists[i]), kv_pages
                 )
             else:  # trailing pages
-                trailing = max(1, len(transfer.keys) if transfer.keys else 1)
-                for prefix_len in range(kv_pages, 0, -1):
-                    if all(
-                        page_exists[i]
-                        for i in range(max(0, prefix_len - trailing), prefix_len)
-                    ):
-                        boundary = prefix_len
-                        break
+                # The sidecar pool holds only a trailing window
+                # (e.g. Mamba/SWA state). `transfer.keys` covers exactly that
+                # window; if every window page exists, the whole KV prefix is
+                # usable (the sidecar only guards the tail), else nothing is.
+                window = len(transfer.keys) if transfer.keys else 1
+                ex_window = [loc is not None for loc in locs][:window]
+                boundary = kv_pages if all(ex_window) and window > 0 else 0
             if boundary:
                 hit_count[transfer.name] = boundary
             final_pages = min(final_pages, boundary)
@@ -1166,7 +1296,7 @@ class PeerCacheStore(HiCacheStorage):
         if src is None:
             return False
         ptrs, sizes = self._ptrs_sizes(list(src), target_sizes, keepalive)
-        res = self._publish(keys, ptrs, sizes)
+        res = self._publish(self._tag_keys(keys), ptrs, sizes)
         return all(res)
 
     def get(self, key, target_location=None, target_sizes=None):
@@ -1188,7 +1318,7 @@ class PeerCacheStore(HiCacheStorage):
         dsts = list(target_locations)
         keepalive: list = []
         ptrs, sizes = self._ptrs_sizes(dsts, target_sizes, keepalive)
-        oks = self._fetch(keys, ptrs, sizes)
+        oks = self._fetch(self._tag_keys(keys), ptrs, sizes)
         return [dsts[i] if oks[i] else None for i in range(len(keys))]
 
     def exists(self, key) -> bool:
@@ -1210,6 +1340,80 @@ class PeerCacheStore(HiCacheStorage):
         with self._key_len_lock:
             self._key_len.clear()
 
+    def get_stats(self):
+        """Return a StorageMetrics-like object consumed by SGLang's HiCache.
+
+        SGLang's cache controller calls get_stats() on the backend to collect
+        prefetch/backup page counts and bandwidth (see
+        sglang/srt/observability/metrics_collector.py StorageMetrics). We fill
+        the same four fields from our internal counters; each entry is a page
+        count / bytes-per-second sample. Falls back to a plain object when the
+        sglang dataclass is unavailable (standalone / no sglang installed).
+        """
+        snap = self._metrics.snapshot() if hasattr(self._metrics, "snapshot") else {}
+        counters = snap.get("counters", {}) if isinstance(snap, dict) else {}
+
+        def _bandwidth_estimate(total_bytes: int, elapsed: float) -> float:
+            return (total_bytes / elapsed) if elapsed > 0 else 0.0
+
+        # Keep a lightweight running sample window (reset on each call is fine:
+        # SGLang polls get_stats() per operation batch).
+        prefetch_pgs = [counters.get("read_requests", 0)]
+        backup_pgs = [counters.get("write_requests", 0)]
+        try:
+            elapsed = max(1e-9, time.time() - self._metrics._start)
+        except Exception:
+            elapsed = 1.0
+        prefetch_bandwidth = [
+            _bandwidth_estimate(counters.get("bytes_read", 0), elapsed)
+        ]
+        backup_bandwidth = [
+            _bandwidth_estimate(counters.get("bytes_written", 0), elapsed)
+        ]
+        try:
+            from sglang.srt.observability.metrics_collector import StorageMetrics
+
+            return StorageMetrics(
+                prefetch_pgs=prefetch_pgs,
+                backup_pgs=backup_pgs,
+                prefetch_bandwidth=prefetch_bandwidth,
+                backup_bandwidth=backup_bandwidth,
+            )
+        except Exception:
+            from types import SimpleNamespace
+
+            return SimpleNamespace(
+                prefetch_pgs=prefetch_pgs,
+                backup_pgs=backup_pgs,
+                prefetch_bandwidth=prefetch_bandwidth,
+                backup_bandwidth=backup_bandwidth,
+            )
+
+    def check_server(self) -> bool:
+        """Lightweight readiness probe: discovery reachable + ring formed.
+
+        Mirrors MooncakeStore.check_server() so SGLang can fail fast at attach
+        time instead of surfacing errors on the first request.
+        """
+        try:
+            if self.runtime is None or not getattr(self.runtime, "started", True):
+                return False
+            # At least ourselves must be in the membership ring.
+            if len(self.runtime.ring) < 1:
+                return False
+            return True
+        except Exception:
+            return False
+
+    def warmup(self) -> None:
+        """No-op warmup hook (kept for interface parity with other backends).
+
+        PeerCache's data plane is lazy: the first publish/fetch allocates the
+        pool and opens channels, which SGLang exercises during server warmup
+        anyway. Explicit pre-allocation would waste host memory on idle nodes.
+        """
+        return None
+
     def close(self) -> None:
         # Idempotent: safe to call from both an explicit shutdown and atexit.
         if getattr(self, "_closed", False):
@@ -1225,3 +1429,4 @@ class PeerCacheStore(HiCacheStorage):
             self._disk.close()
         self._data_rpc.close()
         self.runtime.stop()
+
