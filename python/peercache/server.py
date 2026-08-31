@@ -164,6 +164,13 @@ class NodeRuntime:
             return None
         return self._data_ring.get_node(key)
 
+    def data_owner_all(self, key: str) -> Optional[str]:
+        """Owner of `key` on the FULL membership ring (used by slotmap mode,
+        where every node stores slots and there is no storage-only tier)."""
+        if not self.ring.nodes:
+            return None
+        return self.ring.get_node(key)
+
     def storage_nodes(self) -> List[str]:
         """Live dedicated storage node ids (empty when none registered)."""
         return list(self._data_ring.nodes)
