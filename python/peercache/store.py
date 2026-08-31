@@ -30,6 +30,16 @@ from peercache.metrics import Metrics, MetricsServer
 from peercache.pool import PublishedPool
 from peercache.rpc import RpcClientPool
 from peercache.server import NodeRuntime
+from peercache.slotmap import (
+    SlotGeometry,
+    SlotRegion,
+    slot_matches,
+    slot_present,
+    pick_way_from_bucket,
+    encode_header,
+    key_hash128,
+    HEADER_SIZE,
+)
 from peercache.types import DataLocation
 
 logger = logging.getLogger(__name__)
@@ -162,6 +172,16 @@ class PeerCacheStore(HiCacheStorage):
         self._pool: Optional[PublishedPool] = None
         self._pool_keepalive = None
         self._recv_mr = None
+        # --- slotmap (mode=slotmap) state -----------------------------------
+        # Owner-side slot region (this node's fixed slot MR) + its geometry, and
+        # a cache of peer layouts (node_id -> {base_addr, rkeys, rail_endpoints})
+        # so a reader can compute a peer's slot address with no RPC per key.
+        self._slot_region: Optional[SlotRegion] = None
+        self._slot_geom: Optional[SlotGeometry] = None
+        self._slot_keepalive = None
+        self._slot_mr = None
+        self._peer_layouts: Dict[str, dict] = {}
+        self._peer_layouts_lock = threading.Lock()
         # Per-rail (multi-NIC) bootstrap endpoints this node advertises for its
         # published pool; reads stripe across them. Defaults to the single rail.
         self._rail_endpoints: List[str] = []
@@ -242,6 +262,9 @@ class PeerCacheStore(HiCacheStorage):
             max_workers=2, thread_name_prefix="peercache-prefetch"
         )
         self.runtime.control_rpc.register("data_promote", self._on_data_promote)
+        # slotmap: peers fetch this node's slot-region layout (base+rkeys+geom)
+        # once so they can compute slot addresses locally, directory-free.
+        self.runtime.control_rpc.register("slot_layout", self._on_slot_layout)
 
         # Re-shard the directory when ring membership changes (P2P producers and
         # centralized storage nodes only; inference clients have no local pool).
@@ -301,6 +324,9 @@ class PeerCacheStore(HiCacheStorage):
         storage servers, so no local published pool is created."""
         if self.config.is_inference_client_only():
             return
+        if self.config.is_slotmap():
+            self._ensure_slot_region()
+            return
         if self._pool is not None:
             return
         capacity = max(1, self.config.global_segment_size // self.tp_size)
@@ -319,6 +345,379 @@ class PeerCacheStore(HiCacheStorage):
             "PeerCacheStore published pool ready: %d bytes across %d rail(s)",
             capacity, len(self._rail_endpoints),
         )
+
+    # ------------------------------------------------------------------ #
+    # slotmap: deterministic slot region + directory-free read/write
+    # ------------------------------------------------------------------ #
+    def _ensure_slot_region(self) -> None:
+        """Create this node's fixed slot MR (source of remote READs) once.
+
+        Layout: num_buckets x ways x slot_stride, one size class. Registered as
+        a single RDMA MR; peers compute a key's address purely by hashing, so no
+        directory / lookup RPC is ever needed on the read path."""
+        if self._slot_region is not None:
+            return
+        max_payload = int(self.config.slot_max_page_bytes)
+        ways = max(1, int(self.config.slot_ways))
+        stride = SlotGeometry(max_payload, 1, ways).slot_stride
+        num_buckets = int(self.config.slot_num_buckets)
+        if num_buckets <= 0:
+            cap = max(1, self.config.global_segment_size // self.tp_size)
+            num_buckets = max(1, cap // (stride * ways))
+        geom = SlotGeometry(max_payload, num_buckets, ways)
+        self._slot_keepalive, base_addr = _alloc_host_buffer(geom.capacity)
+        self._slot_mr = self.runtime.transport.register_mr(base_addr, geom.capacity)
+        self._slot_geom = geom
+        self._slot_region = SlotRegion(base_addr, geom)
+        self._rail_endpoints = list(self.runtime.transport.local_endpoints())
+        logger.info(
+            "PeerCacheStore slot region ready: %d buckets x %d ways x %d B "
+            "(=%d bytes) across %d rail(s)",
+            geom.num_buckets, geom.ways, geom.slot_stride, geom.capacity,
+            len(self._rail_endpoints),
+        )
+
+    def _on_slot_layout(self, args: dict) -> dict:
+        """RPC: advertise this node's slot region so peers can address it."""
+        if self._slot_region is None or self._slot_geom is None:
+            return {"ok": False}
+        g = self._slot_geom
+        return {
+            "ok": True,
+            "base_addr": self._slot_region.base_addr,
+            "rkeys": list(self._slot_mr.rkeys),
+            "rail_endpoints": list(self._rail_endpoints),
+            "max_payload": g.max_payload,
+            "num_buckets": g.num_buckets,
+            "ways": g.ways,
+            "slot_stride": g.slot_stride,
+        }
+
+    def _peer_layout(self, node_id: str) -> Optional[dict]:
+        """Return a peer's cached slot layout, fetching it once via RPC.
+
+        The layout (base address, rkeys, geometry) is fixed for a node's
+        lifetime, so it is cached; a reader then computes any key's slot address
+        with zero per-key metadata traffic."""
+        if node_id == self.config.node_id and self._slot_geom is not None:
+            with self._peer_layouts_lock:
+                lay = self._peer_layouts.get(node_id)
+            if lay is None:
+                lay = self._on_slot_layout({})
+                lay["geom"] = self._slot_geom
+                lay["region"] = self._slot_region
+                with self._peer_layouts_lock:
+                    self._peer_layouts[node_id] = lay
+            return lay
+        with self._peer_layouts_lock:
+            lay = self._peer_layouts.get(node_id)
+        if lay is not None:
+            return lay
+        endpoint = self.runtime.discovery.control_of(node_id)
+        if endpoint is None:
+            return None
+        try:
+            resp = self._data_rpc.call(endpoint, "slot_layout", {})
+        except Exception as e:
+            logger.debug("peercache: slot_layout RPC to %s failed: %s", node_id, e)
+            return None
+        if not resp.get("ok"):
+            return None
+        resp["geom"] = SlotGeometry(
+            resp["max_payload"], resp["num_buckets"], resp["ways"]
+        )
+        with self._peer_layouts_lock:
+            self._peer_layouts[node_id] = resp
+        return resp
+
+    def _invalidate_peer_layouts(self) -> None:
+        """Drop cached peer layouts after a membership change (nodes may have
+        left; their base/rkey become invalid)."""
+        with self._peer_layouts_lock:
+            self._peer_layouts.clear()
+
+    def _publish_slotmap(
+        self, comp_keys: List[str], ptrs: List[int], sizes: List[int]
+    ) -> List[bool]:
+        """Directory-free write: each key -> owner node -> N-way bucket slot.
+
+        Own-keys are written locally (memmove + seqlock). Remote keys use a
+        read-modify-write: one batched RDMA READ of the target buckets' bytes
+        picks a way per key (same policy as the local writer: overwrite same key
+        -> empty way -> oldest seq), then one batched RDMA WRITE lands the slot.
+        No directory PUT, no reservation RPC."""
+        t0 = time.perf_counter()
+        results = [False] * len(comp_keys)
+        published_bytes = 0
+
+        # 1) Local (own-key) writes + collect remote keys grouped by owner.
+        remote: List[tuple] = []  # (idx, key, owner, length, geom, lay)
+        for i, key in enumerate(comp_keys):
+            owner = self.runtime.data_owner_all(key)
+            if owner is None:
+                continue
+            length = int(sizes[i])
+            if owner == self.config.node_id:
+                if self._slot_region is not None:
+                    off = self._slot_region.write_local(key, ptrs[i], length)
+                    if off is not None:
+                        results[i] = True
+                        published_bytes += length
+                continue
+            lay = self._peer_layout(owner)
+            if lay is None or length > lay["geom"].max_payload:
+                continue
+            remote.append((i, key, owner, length, lay["geom"], lay))
+
+        # 2) Remote READ of each key's bucket to choose a way (RMW).
+        published_bytes += self._publish_slotmap_remote(remote, ptrs, results)
+
+        self._metrics.record_write(published_bytes, time.perf_counter() - t0)
+        return results
+
+    def _publish_slotmap_remote(self, remote, ptrs, results) -> int:
+        """Read-modify-write the remote slots. Returns bytes published."""
+        if not remote:
+            return 0
+        # --- Phase A: batched READ of each target bucket. ---
+        rd_nodes: List[str] = []
+        rd_local: List[int] = []
+        rd_remote: List[int] = []
+        rd_len: List[int] = []
+        scratches: List[Any] = []
+        rail_eps: Dict[str, List[str]] = {}
+        rail_rks: Dict[str, List[int]] = {}
+        for (_i, key, _owner, _length, geom, lay) in remote:
+            bucket = geom.bucket_index(key)
+            scratch = (ctypes.c_char * geom.bucket_stride)()
+            scratches.append(scratch)
+            nk = lay["rail_endpoints"][0]
+            if nk not in rail_eps:
+                rail_eps[nk] = list(lay["rail_endpoints"])
+                rail_rks[nk] = [int(x) for x in lay["rkeys"]]
+            rd_nodes.append(nk)
+            rd_local.append(ctypes.addressof(scratch))
+            rd_remote.append(lay["base_addr"] + bucket * geom.bucket_stride)
+            rd_len.append(geom.bucket_stride)
+        try:
+            rd_ok = self.runtime.transport.batch_read_multi(
+                rd_nodes, rd_local, rd_remote, rd_len, rail_eps, rail_rks
+            )
+        except Exception as e:
+            logger.debug("peercache: slotmap RMW read failed: %s", e)
+            rd_ok = [False] * len(rd_nodes)
+
+        # --- Phase B: pick a way from each bucket, build & batch WRITE. ---
+        w_nodes: List[str] = []
+        w_local: List[int] = []
+        w_remote: List[int] = []
+        w_len: List[int] = []
+        w_idx: List[int] = []
+        keepalive: list = []
+        w_rail_eps: Dict[str, List[str]] = {}
+        w_rail_rks: Dict[str, List[int]] = {}
+        # Ways already claimed by earlier keys of THIS batch, per (owner,bucket).
+        # Without this, several same-bucket keys in one batch all read the same
+        # pre-write snapshot, pick the same empty way, and overwrite each other.
+        claimed: Dict[tuple, dict] = {}
+        for j, (i, key, owner, length, geom, lay) in enumerate(remote):
+            bucket = geom.bucket_index(key)
+            snap = bytearray(scratches[j]) if rd_ok[j] else bytearray(geom.bucket_stride)
+            # Fold in this batch's earlier picks for the same bucket so the way
+            # chooser sees them as occupied.
+            ck = (owner, bucket)
+            for w, hdr in claimed.get(ck, {}).items():
+                off = w * geom.slot_stride
+                snap[off:off + HEADER_SIZE] = hdr
+            way, new_seq = pick_way_from_bucket(bytes(snap), geom, key)
+            slot_off = geom.slot_offset(bucket, way)
+            hdr = encode_header(key, length, new_seq)
+            claimed.setdefault(ck, {})[way] = hdr
+            buf = self._pack_slot(key, ptrs[i], length, new_seq, keepalive)
+            nk = lay["rail_endpoints"][0]
+            if nk not in w_rail_eps:
+                w_rail_eps[nk] = list(lay["rail_endpoints"])
+                w_rail_rks[nk] = [int(x) for x in lay["rkeys"]]
+            w_nodes.append(nk)
+            w_local.append(ctypes.addressof(buf))
+            w_remote.append(lay["base_addr"] + slot_off)
+            w_len.append(HEADER_SIZE + length)
+            w_idx.append(i)
+        published_bytes = 0
+        if w_nodes:
+            try:
+                oks = self.runtime.transport.batch_write_multi(
+                    w_nodes, w_local, w_remote, w_len, w_rail_eps, w_rail_rks
+                )
+            except Exception as e:
+                logger.debug("peercache: slotmap batch_write failed: %s", e)
+                oks = [False] * len(w_nodes)
+            for j, ok in enumerate(oks):
+                if ok:
+                    results[w_idx[j]] = True
+                    published_bytes += w_len[j] - HEADER_SIZE
+        return published_bytes
+
+    def _pack_slot(self, key: str, src_ptr: int, length: int, seq: int, keepalive: list):
+        """Build a [header|payload] buffer for one remote RDMA WRITE.
+
+        ``seq`` is an even (stable) sequence number strictly fresher than what
+        the slot held; a single WRITE lands the whole slot, and the reader's
+        key_hash/len/seq gate rejects anything that is not this exact page."""
+        total = HEADER_SIZE + length
+        buf = (ctypes.c_char * total)()
+        hdr = encode_header(key, length, seq)
+        ctypes.memmove(ctypes.addressof(buf), hdr, HEADER_SIZE)
+        ctypes.memmove(ctypes.addressof(buf) + HEADER_SIZE, src_ptr, length)
+        keepalive.append(buf)
+        return buf
+
+    def _fetch_slotmap(
+        self, comp_keys: List[str], ptrs: List[int], sizes: List[int]
+    ) -> List[bool]:
+        """Directory-free read: compute each key's owner+slot, READ its whole
+        bucket in one shot, validate the header locally, memmove on a hit.
+
+        A read is a single one-sided RDMA READ per key (the bucket) with NO
+        metadata lookup. A slot that fails validation (wrong key / torn / empty)
+        is a clean miss -- never a dirty hit."""
+        t0 = time.perf_counter()
+        results = [False] * len(comp_keys)
+        # Stage a scratch buffer per remote read (whole bucket), then validate.
+        r_nodes: List[str] = []
+        r_local: List[int] = []
+        r_remote: List[int] = []
+        r_len: List[int] = []
+        r_meta: List[tuple] = []  # (idx, bucket_buf, geom, dst_ptr, exp_len, key)
+        rail_eps: Dict[str, List[str]] = {}
+        rail_rks: Dict[str, List[int]] = {}
+        keepalive: list = []
+        local_hits = 0
+        for i, key in enumerate(comp_keys):
+            owner = self.runtime.data_owner_all(key)
+            if owner is None:
+                continue
+            length = int(sizes[i])
+            if owner == self.config.node_id:
+                if self._slot_region is not None and self._slot_region.read_local(
+                    key, ptrs[i], length
+                ):
+                    results[i] = True
+                    local_hits += 1
+                continue
+            lay = self._peer_layout(owner)
+            if lay is None or length > lay["geom"].max_payload:
+                continue
+            geom = lay["geom"]
+            bucket = geom.bucket_index(key)
+            bucket_off = bucket * geom.bucket_stride
+            bucket_bytes = geom.bucket_stride  # ways x slot_stride (one bucket)
+            scratch = (ctypes.c_char * bucket_bytes)()
+            keepalive.append(scratch)
+            nk = lay["rail_endpoints"][0]
+            if nk not in rail_eps:
+                rail_eps[nk] = list(lay["rail_endpoints"])
+                rail_rks[nk] = [int(x) for x in lay["rkeys"]]
+            r_nodes.append(nk)
+            r_local.append(ctypes.addressof(scratch))
+            r_remote.append(lay["base_addr"] + bucket_off)
+            r_len.append(bucket_bytes)
+            r_meta.append((i, scratch, geom, ptrs[i], length, key))
+        if r_nodes:
+            try:
+                oks = self.runtime.transport.batch_read_multi(
+                    r_nodes, r_local, r_remote, r_len, rail_eps, rail_rks
+                )
+            except Exception as e:
+                logger.debug("peercache: slotmap batch_read failed: %s", e)
+                oks = [False] * len(r_nodes)
+            for j, ok in enumerate(oks):
+                idx, scratch, geom, dst_ptr, exp_len, key = r_meta[j]
+                if not ok:
+                    continue
+                # Scan the ways in this bucket for a validated match.
+                for way in range(geom.ways):
+                    off = way * geom.slot_stride
+                    hdr = bytes(scratch[off:off + HEADER_SIZE])
+                    if slot_matches(hdr, key, exp_len):
+                        ctypes.memmove(
+                            dst_ptr,
+                            ctypes.addressof(scratch) + off + HEADER_SIZE,
+                            exp_len,
+                        )
+                        results[idx] = True
+                        break
+        latency = time.perf_counter() - t0
+        for i in range(len(comp_keys)):
+            self._metrics.record_read(
+                results[i], sizes[i] if results[i] else 0, latency,
+                "local" if results[i] and i < len(comp_keys) else "remote",
+            )
+        return results
+
+
+    def _exists_slotmap(self, comp_keys: List[str]) -> List[bool]:
+        """Directory-free existence probe: for each key compute owner+bucket,
+        READ the whole bucket in one shot, and check the header for a valid
+        stable page for this key -- no payload copy, no metadata lookup.
+
+        Length-agnostic (batch_exists carries no sizes): a header whose key hash
+        matches with an even seq counts as present. A collision/eviction/torn
+        slot is a clean miss, never a dirty hit."""
+        present = [False] * len(comp_keys)
+        r_local: List[int] = []
+        r_nodes: List[str] = []
+        r_remote: List[int] = []
+        r_len: List[int] = []
+        r_meta: List[tuple] = []  # (idx, scratch, geom, key)
+        rail_eps: Dict[str, List[str]] = {}
+        rail_rks: Dict[str, List[int]] = {}
+        keepalive: list = []
+        for i, key in enumerate(comp_keys):
+            owner = self.runtime.data_owner_all(key)
+            if owner is None:
+                continue
+            if owner == self.config.node_id:
+                if self._slot_region is not None:
+                    if self._slot_region.exists_local(key) is not None:
+                        present[i] = True
+                continue
+            lay = self._peer_layout(owner)
+            if lay is None:
+                continue
+            geom = lay["geom"]
+            bucket_off = geom.bucket_index(key) * geom.bucket_stride
+            bucket_bytes = geom.bucket_stride
+            scratch = (ctypes.c_char * bucket_bytes)()
+            keepalive.append(scratch)
+            nk = lay["rail_endpoints"][0]
+            if nk not in rail_eps:
+                rail_eps[nk] = list(lay["rail_endpoints"])
+                rail_rks[nk] = [int(x) for x in lay["rkeys"]]
+            r_nodes.append(nk)
+            r_local.append(ctypes.addressof(scratch))
+            r_remote.append(lay["base_addr"] + bucket_off)
+            r_len.append(bucket_bytes)
+            r_meta.append((i, scratch, geom, key))
+        if r_nodes:
+            try:
+                oks = self.runtime.transport.batch_read_multi(
+                    r_nodes, r_local, r_remote, r_len, rail_eps, rail_rks
+                )
+            except Exception as e:
+                logger.debug("peercache: slotmap exists read failed: %s", e)
+                oks = [False] * len(r_nodes)
+            for j, ok in enumerate(oks):
+                if not ok:
+                    continue
+                idx, scratch, geom, key = r_meta[j]
+                for way in range(geom.ways):
+                    off = way * geom.slot_stride
+                    hdr = bytes(scratch[off:off + HEADER_SIZE])
+                    if slot_present(hdr, key) is not None:
+                        present[idx] = True
+                        break
+        return present
 
     def register_mem_pool_host(self, mem_pool_host):
         """SGLang v1 registration: one KV host pool."""
@@ -479,6 +878,13 @@ class PeerCacheStore(HiCacheStorage):
 
     def _on_membership_change(self, members) -> None:
         """Dispatch a directory re-shard off the discovery/heartbeat thread."""
+        if self.config.is_slotmap():
+            # No directory to re-shard; just drop cached peer layouts (a node may
+            # have left / a new one joined -> ring ownership moved). Keys whose
+            # owner changed become clean misses until re-written -- harmless for
+            # a recomputable cache.
+            self._invalidate_peer_layouts()
+            return
         if self._pool is None:
             return
         try:
@@ -604,6 +1010,23 @@ class PeerCacheStore(HiCacheStorage):
         # directory.exists), and resident hits are primed so the imminent
         # batch_get reuses them instead of issuing a second directory RPC.
         comp_keys, mult = self._lookup_keys(keys)
+        if self.config.is_slotmap():
+            # Directory-free existence probe: one bucket READ per key, header
+            # validated locally. SGLang wants the contiguous hit prefix length
+            # (in original-key units), so count until the first miss.
+            present = self._exists_slotmap(comp_keys)
+            n = 0
+            for k in range(len(keys)):
+                block = present[k * mult:(k + 1) * mult]
+                if block and all(block):
+                    n += 1
+                else:
+                    break
+            self._metrics.inc("exists_requests")
+            if n:
+                self._metrics.inc("exists_pages_found", n)
+                self._keyspace_detected = True
+            return n
         locs = self._dir_get(comp_keys)
         n = self._hit_prefix(locs, mult)
         if n:
@@ -642,6 +1065,8 @@ class PeerCacheStore(HiCacheStorage):
     # ------------------------------------------------------------------ #
     def _publish(self, comp_keys: List[str], ptrs: List[int], sizes: List[int]) -> List[bool]:
         mode = self.config.mode
+        if mode == "slotmap":
+            return self._publish_slotmap(comp_keys, ptrs, sizes)
         if mode == "p2p":
             return self._publish_p2p(comp_keys, ptrs, sizes)
         if mode == "centralized":
@@ -927,6 +1352,8 @@ class PeerCacheStore(HiCacheStorage):
         return out
 
     def _fetch(self, comp_keys: List[str], ptrs: List[int], sizes: List[int]) -> List[bool]:
+        if self.config.is_slotmap():
+            return self._fetch_slotmap(comp_keys, ptrs, sizes)
         t0 = time.perf_counter()
         locations = self._take_primed(comp_keys)
         results = [False] * len(comp_keys)

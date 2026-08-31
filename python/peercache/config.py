@@ -117,6 +117,19 @@ class PeerCacheConfig:
     # never collide. All nodes of one deployment must use the same prefix.
     prefix: str = ""
 
+    # --- Deterministic slot-map placement (mode=slotmap) --------------------
+    # When mode="slotmap", PeerCache drops the directory entirely: a key maps to
+    # its owner by the ring and to a fixed physical slot by hashing, so a reader
+    # issues a one-sided RDMA READ with NO metadata lookup (see slotmap.py).
+    #   slot_max_page_bytes : max payload of one KV page (one size class for now).
+    #   slot_ways           : N-way associativity per bucket (collisions evict,
+    #                         never dirty-hit). More ways -> higher hit rate.
+    #   slot_num_buckets    : bucket count per node; 0 -> derived from
+    #                         global_segment_size / (ways * slot_stride).
+    slot_max_page_bytes: int = 262144  # 256 KiB default; tune to your KV page.
+    slot_ways: int = 4
+    slot_num_buckets: int = 0
+
     # Heartbeat / membership refresh interval (seconds).
     heartbeat_interval: float = 2.0
     member_ttl: float = 6.0
@@ -134,6 +147,7 @@ class PeerCacheConfig:
         if not self.node_id:
             self.node_id = f"{self.local_hostname}-{uuid.uuid4().hex[:8]}"
         self.global_segment_size = _parse_size(self.global_segment_size)
+        self.slot_max_page_bytes = _parse_size(self.slot_max_page_bytes)
         # Normalise the rail device list: prefer device_names, else device_name,
         # else [""] (single rail, auto-pick first device).
         if self.device_names:
@@ -150,6 +164,10 @@ class PeerCacheConfig:
 
     def is_centralized(self) -> bool:
         return str(self.mode).strip().lower() == "centralized"
+
+    def is_slotmap(self) -> bool:
+        """Directory-free deterministic slot placement (mode=slotmap)."""
+        return str(self.mode).strip().lower() == "slotmap"
 
     def is_hybrid(self) -> bool:
         return str(self.mode).strip().lower() == "hybrid"
@@ -184,10 +202,10 @@ class PeerCacheConfig:
     def _validate(self) -> None:
         """Fail fast on misconfiguration with an actionable message."""
         mode = str(self.mode).strip().lower()
-        if mode not in ("p2p", "hybrid", "centralized"):
+        if mode not in ("p2p", "hybrid", "centralized", "slotmap"):
             raise ValueError(
-                f"peercache: mode must be 'p2p', 'hybrid', or 'centralized', "
-                f"got {self.mode!r}"
+                f"peercache: mode must be 'p2p', 'hybrid', 'centralized', or "
+                f"'slotmap', got {self.mode!r}"
             )
         self.mode = mode
         role = str(self.role).strip().lower()
@@ -304,6 +322,9 @@ class PeerCacheConfig:
             "heartbeat_interval",
             "member_ttl",
             "max_masters",
+            "slot_max_page_bytes",
+            "slot_ways",
+            "slot_num_buckets",
         }
         kwargs = {k: v for k, v in extra.items() if k in known}
         return cls(**kwargs)
