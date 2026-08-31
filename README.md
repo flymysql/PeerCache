@@ -152,6 +152,40 @@ python -m sglang.launch_server --enable-hierarchical-cache \
 
 See [examples/sglang_launch.md](examples/sglang_launch.md) for details.
 
+### Built-in backend (after the upstream PR lands)
+
+Once PeerCache is registered in sglang's `StorageBackendFactory` (see
+[sglang-pr/](sglang-pr/)), it can be enabled with a single flag — no
+extra-config:
+
+```bash
+python -m sglang.launch_server --enable-hierarchical-cache \
+  --hicache-write-policy write_through \
+  --hicache-storage-backend peercache
+```
+
+### Tenant / model isolation
+
+When several sglang deployments share one PeerCache cluster, set a unique
+`prefix` in each deployment's extra config so their keyspaces never collide:
+
+```bash
+--hicache-storage-backend-extra-config \
+  '{"backend_name":"peercache","module_path":"peercache.store","class_name":"PeerCacheStore",
+    "discovery_addr":"NODE0_IP:31998","protocol":"rdma","prefix":"model-a"}'
+```
+
+All nodes of one deployment must use the same `prefix`.
+
+### SGLang integration tests
+
+- `tests/sglang/test_sglang_contract.py` — contract vs a real sglang install
+  (no GPU; runs in CI)
+- `tests/sglang/test_sglang_e2e.py` — full sglang server + PeerCache e2e
+  (GPU; TCP protocol validates the whole control plane without RDMA)
+
+See [tests/sglang/README.md](tests/sglang/README.md).
+
 ## Benchmarks
 
 A systematic benchmark suite ships **inside the package** and is exposed as a
@@ -211,3 +245,4 @@ pytest -q
   environment `pypi`). Tagging `vX.Y.Z` then builds the sdist, attaches it to a
   GitHub Release, and publishes to PyPI. Until configured, the PyPI step is
   non-blocking and the GitHub Release still ships the package.
+

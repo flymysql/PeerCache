@@ -248,3 +248,219 @@ def test_v2_exists_with_mocked_sglang(cluster, monkeypatch):
     assert all(a.batch_set_v1(keys, list(range(4))))
     out = b.batch_exists_v2(keys, pool_transfers=None)
     assert out.prefix_keys == 4
+
+
+def test_v2_sidecar_indexer_pool_roundtrip(cluster, monkeypatch):
+    """DSA / MiniMax sidecar: SGLang injects an INDEXER PoolTransfer
+    (ALL_PAGES, indices_from_pool=KV). Writes via batch_set_v2 must land in a
+    pool-namespaced keyspace, and reads via batch_get_v2 must return them;
+    batch_exists_v2 must combine KV + INDEXER into a usable prefix."""
+    fake = types.ModuleType("sglang.srt.mem_cache.hicache_storage")
+
+    class PoolHitPolicy:
+        ALL_PAGES = "all_pages"
+        TRAILING_PAGES = "trailing_pages"
+
+    class PoolTransferResult:
+        def __init__(self, prefix_keys, hit_count):
+            self.prefix_keys = prefix_keys
+            self.hit_count = hit_count
+
+    fake.PoolHitPolicy = PoolHitPolicy
+    fake.PoolTransferResult = PoolTransferResult
+    for mod in ("sglang", "sglang.srt", "sglang.srt.mem_cache",
+                "sglang.srt.mem_cache.hicache_storage"):
+        monkeypatch.setitem(sys.modules, mod, fake)
+
+    a, b = cluster
+    page, n = 4096, 64
+    a.register_mem_pool_host(_MemPoolHost(page, n))
+    b.register_mem_pool_host(_MemPoolHost(page, n))
+    # Sidecar pool (e.g. DSA indexer) registered under its own name.
+    a.register_mem_host_pool_v2(_MemPoolHost(page, n), "indexer")
+    b.register_mem_host_pool_v2(_MemPoolHost(page, n), "indexer")
+
+    keys = [f"side{i}" for i in range(4)]
+    # KV pool write (v2 path)
+    kv_set = SimpleNamespace(name="kv", keys=keys, host_indices=list(range(4)))
+    res = a.batch_set_v2([kv_set])
+    assert all(res["kv"])
+    # INDEXER pool write (v2 path, same host_indices = indices_from_pool=KV)
+    idx_set = SimpleNamespace(name="indexer", keys=keys, host_indices=list(range(4)))
+    res = a.batch_set_v2([idx_set])
+    assert all(res["indexer"])
+
+    # exists_v2: KV + INDEXER both present -> full prefix usable
+    transfers = [
+        SimpleNamespace(name="indexer", keys=keys, host_indices=list(range(4)),
+                        hit_policy=PoolHitPolicy.ALL_PAGES, indices_from_pool="kv")
+    ]
+    out = b.batch_exists_v2(keys, pool_transfers=transfers)
+    assert out.prefix_keys == 4
+    assert out.hit_count.get("indexer") == 4
+
+    # get_v2: both pools read back
+    kv_get = SimpleNamespace(name="kv", keys=keys, host_indices=list(range(4)))
+    idx_get = SimpleNamespace(name="indexer", keys=keys, host_indices=list(range(4)))
+    res = b.batch_get_v2([kv_get, idx_get])
+    assert all(res["kv"]) and all(res["indexer"])
+
+
+def test_v2_sidecar_missing_clamps_prefix(cluster, monkeypatch):
+    """If the sidecar pool is missing pages, batch_exists_v2 must clamp the
+    usable prefix (ALL_PAGES semantics) instead of returning the full KV."""
+    fake = types.ModuleType("sglang.srt.mem_cache.hicache_storage")
+
+    class PoolHitPolicy:
+        ALL_PAGES = "all_pages"
+        TRAILING_PAGES = "trailing_pages"
+
+    class PoolTransferResult:
+        def __init__(self, prefix_keys, hit_count):
+            self.prefix_keys = prefix_keys
+            self.hit_count = hit_count
+
+    fake.PoolHitPolicy = PoolHitPolicy
+    fake.PoolTransferResult = PoolTransferResult
+    for mod in ("sglang", "sglang.srt", "sglang.srt.mem_cache",
+                "sglang.srt.mem_cache.hicache_storage"):
+        monkeypatch.setitem(sys.modules, mod, fake)
+
+    a, b = cluster
+    page, n = 4096, 64
+    a.register_mem_pool_host(_MemPoolHost(page, n))
+    b.register_mem_pool_host(_MemPoolHost(page, n))
+    a.register_mem_host_pool_v2(_MemPoolHost(page, n), "indexer")
+    b.register_mem_host_pool_v2(_MemPoolHost(page, n), "indexer")
+
+    keys = [f"clamp{i}" for i in range(4)]
+    # Only KV written; INDEXER sidecar is empty.
+    kv_set = SimpleNamespace(name="kv", keys=keys, host_indices=list(range(4)))
+    res = a.batch_set_v2([kv_set])
+    assert all(res["kv"])
+
+    transfers = [
+        SimpleNamespace(name="indexer", keys=keys, host_indices=list(range(4)),
+                        hit_policy=PoolHitPolicy.ALL_PAGES, indices_from_pool="kv")
+    ]
+    out = b.batch_exists_v2(keys, pool_transfers=transfers)
+    assert out.prefix_keys == 0  # clamped: no INDEXER pages -> unusable prefix
+    assert out.hit_count.get("indexer") in (None, 0)
+
+
+def test_get_stats_and_check_server(cluster):
+    """get_stats() returns a StorageMetrics-compatible object; check_server()
+    reports readiness once the ring is formed."""
+    a, b = cluster
+    # ring formed by the fixture (>= 2 members)
+    assert a.check_server() is True
+
+    stats = a.get_stats()
+    for attr in ("prefetch_pgs", "backup_pgs", "prefetch_bandwidth", "backup_bandwidth"):
+        assert hasattr(stats, attr), f"get_stats missing {attr}"
+    assert isinstance(stats.prefetch_pgs, list)
+    assert isinstance(stats.backup_pgs, list)
+
+    # After a write, backup_pgs reflects activity.
+    page, n = 4096, 64
+    a.register_mem_pool_host(_MemPoolHost(page, n))
+    keys = [f"st{i}" for i in range(2)]
+    assert all(a.batch_set_v1(keys, list(range(2))))
+    stats2 = a.get_stats()
+    assert stats2.backup_pgs and stats2.backup_pgs[0] >= 1
+
+
+def test_prefix_isolation_two_tenants():
+    """Two deployments sharing one discovery node with different `prefix`
+    values must not see each other's keys (tenant/model isolation)."""
+    from peercache.discovery import DiscoveryServer
+
+    meta = DiscoveryServer("127.0.0.1", 0)
+    addr = "127.0.0.1:%d" % meta.start()
+    page, n = 4096, 64
+
+    def make(node, prefix):
+        cfg = _cfg(addr, node)
+        cfg.extra_config = dict(cfg.extra_config)
+        cfg.extra_config["prefix"] = prefix
+        s = PeerCacheStore(cfg)
+        s.register_mem_pool_host(_MemPoolHost(page, n))
+        return s
+
+    t1a = make("T1A", "tenant1")
+    t2a = make("T2A", "tenant2")
+    try:
+        deadline = time.time() + 10
+        while time.time() < deadline and (len(t1a.runtime.ring) < 2 or len(t2a.runtime.ring) < 2):
+            time.sleep(0.05)
+
+        keys = ["shared-key-%d" % i for i in range(3)]
+        # Tenant 1 writes; tenant 2 must NOT see it (keys are namespaced).
+        assert all(t1a.batch_set_v1(keys, list(range(3))))
+        assert t2a.batch_exists(keys) == 0, "tenant2 saw tenant1's keys!"
+        # Tenant 2 writes the same logical keys; both coexist.
+        assert all(t2a.batch_set_v1(keys, list(range(3))))
+        assert t1a.batch_exists(keys) == 3
+        assert t2a.batch_exists(keys) == 3
+    finally:
+        t1a.close()
+        t2a.close()
+        meta.stop()
+
+
+def test_v2_trailing_pages_hit_policy(cluster, monkeypatch):
+    """Mamba/SWA: batch_exists_v2 with TRAILING_PAGES only requires the LAST
+    N pages of the prefix to exist in the sidecar pool."""
+    fake = types.ModuleType("sglang.srt.mem_cache.hicache_storage")
+
+    class PoolHitPolicy:
+        ALL_PAGES = "all_pages"
+        TRAILING_PAGES = "trailing_pages"
+
+    class PoolTransferResult:
+        def __init__(self, prefix_keys, hit_count):
+            self.prefix_keys = prefix_keys
+            self.hit_count = hit_count
+
+    fake.PoolHitPolicy = PoolHitPolicy
+    fake.PoolTransferResult = PoolTransferResult
+    for mod in ("sglang", "sglang.srt", "sglang.srt.mem_cache",
+                "sglang.srt.mem_cache.hicache_storage"):
+        monkeypatch.setitem(sys.modules, mod, fake)
+
+    a, b = cluster
+    page, n = 4096, 64
+    a.register_mem_pool_host(_MemPoolHost(page, n))
+    b.register_mem_pool_host(_MemPoolHost(page, n))
+    a.register_mem_host_pool_v2(_MemPoolHost(page, n), "swa")
+    b.register_mem_host_pool_v2(_MemPoolHost(page, n), "swa")
+
+    keys = [f"swa{i}" for i in range(5)]
+    # KV pool: all 5 pages written.
+    assert all(a.batch_set_v2([SimpleNamespace(name="kv", keys=keys, host_indices=list(range(5)))]).get("kv"))
+    # SWA sidecar: only the last 2 pages written (trailing window).
+    swa_keys = keys[-2:]
+    assert all(a.batch_set_v2([SimpleNamespace(name="swa", keys=swa_keys, host_indices=[3, 4])]).get("swa"))
+
+    transfers = [
+        SimpleNamespace(name="swa", keys=swa_keys, host_indices=[3, 4],
+                        hit_policy=PoolHitPolicy.TRAILING_PAGES, indices_from_pool="kv")
+    ]
+    # 5 KV pages + trailing-2 SWA window present -> full prefix usable.
+    out = b.batch_exists_v2(keys, pool_transfers=transfers)
+    assert out.prefix_keys == 5
+    assert out.hit_count.get("swa") == 5
+
+    # Only the middle pages of SWA exist -> the trailing window (the pages the
+    # transfer actually guards) is missing -> nothing usable.
+    keys2 = [f"swb{i}" for i in range(5)]
+    assert all(a.batch_set_v2([SimpleNamespace(name="kv", keys=keys2, host_indices=list(range(5)))]).get("kv"))
+    # SWA holds pages 2..3 (middle); the transfer guards the trailing window 3..4.
+    assert all(a.batch_set_v2([SimpleNamespace(name="swa", keys=keys2[2:4], host_indices=[2, 3])]).get("swa"))
+    transfers2 = [
+        SimpleNamespace(name="swa", keys=keys2[3:5], host_indices=[3, 4],
+                        hit_policy=PoolHitPolicy.TRAILING_PAGES, indices_from_pool="kv")
+    ]
+    out2 = b.batch_exists_v2(keys2, pool_transfers=transfers2)
+    assert out2.prefix_keys == 0
+

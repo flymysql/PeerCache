@@ -6,6 +6,40 @@ All notable changes to PeerCache are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+- **SGLang official-backend readiness** — `get_stats()` (returns the sglang
+  `StorageMetrics` shape), `check_server()` readiness probe, and a `warmup()`
+  hook for interface parity with Mooncake/Nixl. `batch_exists_v2` now falls
+  back gracefully on sglang releases that predate `PoolHitPolicy` /
+  `PoolTransferResult` (e.g. 0.5.9).
+- **DeepSeek-V4 multi-buffer pools** — `batch_set_v2`/`batch_get_v2` pack and
+  scatter pages that span multiple host buffers (`DEEPSEEK_V4_C4/C128/STATE`,
+  mooncake `_pack_multi_buffer_meta` equivalent); verified cross-node
+  byte-identical against sglang main's real v2 types (2 and 3 buffers/page).
+- **Draft pools (speculative decoding)** — `_v2_component_keys` picks the
+  suffix scheme from the draft pool's own class: MHA draft → `_k`+`_v` double
+  components, MLA draft → single `_k` component (mirrors mooncake); verified
+  both paths cross-node byte-identical against sglang main.
+- **Keyspace prefix isolation** — new `prefix` config (mirrors Mooncake's
+  `config_prefix`): every key is namespaced `<prefix>_<key>` so multiple
+  sglang deployments can share one PeerCache cluster without collisions.
+- **SGLang integration tests** — `tests/sglang/`: contract tests against a
+  real sglang install (CPU, CI), main-branch v2 contract tests
+  (`test_main_v2_contract.py`: DSA INDEXER / Mamba TRAILING / DeepSeek-V4
+  multi-buffer / Draft MHA+MLA), and a full GPU e2e test. CI gains
+  `sglang-contract` (no GPU) and `sglang-e2e-gpu` (self-hosted,
+  label-triggered) jobs.
+- **Upstream PR kit** — `sglang-pr/` contains the backend_factory /
+  server_args patches and the registered HiCache test to land PeerCache as a
+  built-in `--hicache-storage-backend peercache`.
+
+### Fixed
+- `batch_exists_v2` TRAILING_PAGES semantics: the sidecar window is checked
+  against `transfer.keys` (not the whole KV prefix), matching sglang's
+  "only the last N pages must exist" contract.
+- `test_discovery.py` multi-master failover test: raised the survivor
+  re-derivation timeout (5s -> 15s) to stop flaking on slow machines.
+
 ## [0.8.2] - 2026-06-04
 
 ### Added
@@ -425,3 +459,4 @@ Initial release.
 [0.2.0]: https://github.com/flymysql/PeerCache/releases/tag/v0.2.0
 [0.1.1]: https://github.com/flymysql/PeerCache/releases/tag/v0.1.1
 [0.1.0]: https://github.com/flymysql/PeerCache/releases/tag/v0.1.0
+

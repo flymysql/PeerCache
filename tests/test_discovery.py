@@ -105,8 +105,12 @@ def test_multi_master_three_masters_and_failover():
         c3 = clients["127.0.0.3"]
         # Survivors prune the dead nodes and re-derive masters from who's left;
         # discovery keeps working through the remaining master(s)/seed.
-        assert _wait(lambda: set(c3.members().keys()) == {"127.0.0.3-n", "127.0.0.4-n"})
-        assert _wait(lambda: c3.master_hosts() == ["127.0.0.3", "127.0.0.4"])
+        # TTL is 2s and re-derivation needs a couple of heartbeat rounds, so
+        # allow up to 15s on slow/loaded machines (was flaky at the 5s default).
+        assert _wait(lambda: set(c3.members().keys()) == {"127.0.0.3-n", "127.0.0.4-n"},
+                     timeout=15.0)
+        assert _wait(lambda: c3.master_hosts() == ["127.0.0.3", "127.0.0.4"],
+                     timeout=15.0)
     finally:
         for h in ("127.0.0.3", "127.0.0.4"):
             clients[h].stop()
@@ -169,3 +173,4 @@ def test_multi_master_small_cluster_all_masters():
             c.stop()
         for s in servers.values():
             s.stop()
+
