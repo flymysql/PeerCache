@@ -60,3 +60,67 @@ jobs:
           python -c "from peercache import _peercache; assert _peercache.HAS_RDMA is False; print('stub build OK')"
       - name: Run tests
         run: pytest -q
+
+  # ------------------------------------------------------------------ #
+  # SGLang integration: contract vs a real sglang install (no GPU).
+  # Verifies PeerCacheStore subclasses the real HiCacheStorage and the
+  # v1/v2 + sidecar-pool paths work against sglang's real interfaces.
+  # ------------------------------------------------------------------ #
+  sglang-contract:
+    name: sglang contract (no GPU)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install PeerCache (no RDMA) + sglang
+        run: |
+          python -m pip install --upgrade pip
+          pip install ".[test]" --config-settings=cmake.define.PEERCACHE_NO_RDMA=ON
+          # Latest sglang: pulls torch (CPU wheel on hosted runners) which is
+          # large; a pinned sglang keeps the cache warm and the job fast.
+          pip install "sglang[all]==0.5.9" 2>/dev/null || pip install sglang
+      - name: Run sglang contract tests
+        run: pytest tests/sglang/test_sglang_contract.py -v
+
+      - name: Run sglang main-branch v2 contract tests
+        # Fetches the main-branch hicache_storage.py (PoolName/PoolTransfer/
+        # PoolHitPolicy + DeepSeek-V4/DRAFT pool names) from GitHub and drives
+        # PeerCache's v2 + sidecar paths against the real main-branch types.
+        run: pytest tests/sglang/test_main_v2_contract.py -v
+
+      - name: Run sglang official-registration tests
+        # Applies the PR patches (register_backend + _create_builtin_backend)
+        # to the main-branch backend_factory.py and verifies
+        # create_backend('peercache', ...) works like the builtin backends.
+        run: pytest tests/sglang/test_official_registration.py -v
+
+  # ------------------------------------------------------------------ #
+  # SGLang end-to-end: real sglang server + PeerCache backend on a GPU
+  # runner (self-hosted). TCP protocol validates the full control plane
+  # (discovery -> DHT directory -> published pool -> fetch) without RDMA.
+  # Triggered manually or by label; skipped when no GPU runner is online.
+  # ------------------------------------------------------------------ #
+  sglang-e2e-gpu:
+    name: sglang e2e (GPU, TCP protocol)
+    runs-on: [self-hosted, linux, x64, gpu]
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' &&
+       contains(github.event.pull_request.labels.*.name, 'run-sglang-e2e'))
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install PeerCache + sglang (CUDA)
+        run: |
+          python -m pip install --upgrade pip
+          pip install ".[test]" --config-settings=cmake.define.PEERCACHE_NO_RDMA=ON
+          pip install "sglang[srt]==0.5.9"
+      - name: Run sglang e2e (PeerCache backend)
+        env:
+          PEERCACHE_E2E_MODEL: Qwen/Qwen2.5-0.5B-Instruct
+        run: python tests/sglang/test_sglang_e2e.py
+
