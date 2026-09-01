@@ -39,12 +39,27 @@ MODEL = os.environ.get(
 PORT = int(os.environ.get("PEERCACHE_E2E_PORT", "30000"))
 DISCOVERY = "127.0.0.1:31998"
 METRICS_PORT = 31997
-EXTRA_CONFIG = (
-    '{"backend_name":"peercache","module_path":"peercache.store",'
-    '"class_name":"PeerCacheStore","discovery_addr":"%s","protocol":"tcp",'
-    '"local_hostname":"127.0.0.1","node_id":"A","global_segment_size":"1gb",'
-    '"metrics_enabled":true}'
-) % DISCOVERY
+MODE = os.environ.get("PEERCACHE_E2E_MODE", "p2p")
+
+
+def _extra_config(node_id="A", mode="p2p"):
+    """Build the PeerCache extra-config JSON for the given mode."""
+    base = (
+        '"backend_name":"peercache","module_path":"peercache.store",'
+        '"class_name":"PeerCacheStore","discovery_addr":"%s","protocol":"tcp",'
+        '"local_hostname":"127.0.0.1","node_id":"%s","global_segment_size":"1gb",'
+        '"metrics_enabled":true'
+    ) % (DISCOVERY, node_id)
+    if mode == "slotmap":
+        # Deterministic slot addressing: no directory, key hashes to a fixed
+        # physical slot; the reader READs the whole N-way bucket in one shot.
+        # slot_max_page_bytes must be >= the KV page size sglang emits.
+        base += (
+            ',"mode":"slotmap","slot_max_page_bytes":262144,'
+            '"slot_ways":4,"slot_num_buckets":0'
+        )
+    return "{%s}" % base
+
 
 SHARED_PREFIX = (
     "The theory of general relativity, published by Albert Einstein in 1915, "
@@ -87,6 +102,8 @@ def main():
     ap.add_argument("--model-path", default=MODEL)
     ap.add_argument("--port", type=int, default=PORT)
     ap.add_argument("--requests", type=int, default=4)
+    ap.add_argument("--mode", default=MODE, choices=["p2p", "slotmap"],
+                    help="PeerCache mode: p2p (directory) or slotmap (directory-free)")
     ap.add_argument("--no-server", action="store_true",
                     help="skip server launch; attach to an already-running one")
     args = ap.parse_args()
@@ -102,10 +119,10 @@ def main():
             "--hicache-write-policy", "write_through",
             "--hicache-ratio", "1.05",
             "--hicache-storage-backend", "dynamic",
-            "--hicache-storage-backend-extra-config", EXTRA_CONFIG,
+            "--hicache-storage-backend-extra-config", _extra_config(mode=args.mode),
             "--disable-cuda-graph",
         ]
-        print("launching: %s" % " ".join(cmd[:6]))
+        print("launching (%s mode): %s" % (args.mode, " ".join(cmd[:6])))
         # Build a clean env for the server child: inherit everything, then
         # make sure the CUDA libs are visible to BOTH the dynamic loader
         # (LD_LIBRARY_PATH) and the JIT linker (LIBRARY_PATH). On machines
@@ -164,14 +181,20 @@ def main():
         print("  FAIL: PeerCache received no/too few writes (got %s, want >= %d)"
               % (write_reqs, args.requests))
         ok = False
-    if not pool_keys or pool_keys <= 0:
+    if args.mode == "p2p" and (not pool_keys or pool_keys <= 0):
+        # p2p mode publishes pages into a node-local pool; slotmap mode has no
+        # pool (keys hash straight to physical slots), so pool_keys stays 0.
         print("  FAIL: PeerCache pool is empty")
+        ok = False
+    if not bytes_written or bytes_written <= 0:
+        print("  FAIL: no KV bytes written to PeerCache")
         ok = False
     if not members or members < 1:
         print("  FAIL: PeerCache membership ring empty")
         ok = False
     if ok:
-        print("PASS: KV pages were published into PeerCache through sglang HiCache")
+        print("PASS: KV pages were published into PeerCache through sglang HiCache (%s)"
+              % args.mode)
 
     if proc is not None:
         proc.terminate()

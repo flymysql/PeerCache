@@ -5,7 +5,7 @@
 | 文件 | 需要 | 验证内容 |
 |---|---|---|
 | `test_sglang_contract.py` | sglang 已安装（无需 GPU） | PeerCacheStore 继承真实 `HiCacheStorage`、v1/v2 接口用真实 `HiCacheStorageConfig`/`PoolTransfer`/`PoolTransferResult` 跑通、`get_stats` 返回真实 `StorageMetrics` |
-| `test_sglang_e2e.py` | GPU + sglang + 模型 | 起真实 sglang server（`--hicache-storage-backend dynamic` 挂 PeerCache），发真实请求，断言 PeerCache metrics（write_requests/pool_keys/members） |
+| `test_sglang_e2e.py` | GPU + sglang + 模型 | 起真实 sglang server（`--hicache-storage-backend dynamic` 挂 PeerCache），发真实请求，断言 PeerCache metrics。支持 `--mode p2p`（目录，校验 write_requests/pool_keys）与 `--mode slotmap`（目录无关，校验 write_requests/bytes_written） |
 
 ## 本地运行
 
@@ -13,11 +13,18 @@
 # 契约测试（无 GPU，需 pip install sglang）
 pytest tests/sglang/test_sglang_contract.py -v
 
-# e2e（需 GPU 和模型）
+# e2e（需 GPU 和模型），p2p 目录模式（默认）
 PEERCACHE_SGLANG_PY=/path/to/python-with-sglang \
 PEERCACHE_E2E_MODEL=Qwen/Qwen2.5-0.5B-Instruct \
-python tests/sglang/test_sglang_e2e.py
+python tests/sglang/test_sglang_e2e.py --mode p2p
+
+# e2e，slotmap 目录无关模式
+python tests/sglang/test_sglang_e2e.py --mode slotmap
 ```
+
+> slotmap 模式下 `pool_keys` 恒为 0（无 published pool，key 直接哈希到物理槽），
+> e2e 脚本按模式区分断言；`write_requests` / `bytes_written` 是两种模式的
+> 共同正确性证据。
 
 ## CI 集成
 
