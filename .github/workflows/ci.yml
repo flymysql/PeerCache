@@ -119,8 +119,13 @@ jobs:
           python -m pip install --upgrade pip
           pip install ".[test]" --config-settings=cmake.define.PEERCACHE_NO_RDMA=ON
           pip install "sglang[srt]==0.5.9"
-      - name: Run sglang e2e (PeerCache backend)
+      - name: Run sglang e2e (p2p directory mode)
         env:
           PEERCACHE_E2E_MODEL: Qwen/Qwen2.5-0.5B-Instruct
-        run: python tests/sglang/test_sglang_e2e.py
+        run: python tests/sglang/test_sglang_e2e.py --mode p2p
+
+      - name: Run sglang e2e (slotmap directory-free mode)
+        env:
+          PEERCACHE_E2E_MODEL: Qwen/Qwen2.5-0.5B-Instruct
+        run: python tests/sglang/test_sglang_e2e.py --mode slotmap
 

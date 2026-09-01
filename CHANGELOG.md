@@ -7,6 +7,12 @@ All notable changes to PeerCache are documented here. The format is based on
 ## [Unreleased]
 
 ### Added
+- **slotmap sglang e2e** — `tests/sglang/test_sglang_e2e.py` gained a
+  `--mode {p2p,slotmap}` switch; the slotmap path launches a real sglang
+  server with `mode=slotmap` and asserts KV pages flow through the
+  directory-free slot region (write_requests / bytes_written, since
+  `pool_keys` is 0 by design without a published pool). CI's
+  `sglang-e2e-gpu` job now runs both modes.
 - **SGLang official-backend readiness** — `get_stats()` (returns the sglang
   `StorageMetrics` shape), `check_server()` readiness probe, and a `warmup()`
   hook for interface parity with Mooncake/Nixl. `batch_exists_v2` now falls
