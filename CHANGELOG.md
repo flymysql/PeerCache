@@ -7,6 +7,14 @@ All notable changes to PeerCache are documented here. The format is based on
 ## [Unreleased]
 
 ### Added
+- **2-node slotmap cross-node read e2e** — `tests/sglang/test_sglang_e2e.py`
+  gained `--keep-server`; new `tests/sglang/test_sglang_2node_slotmap_read.py`
+  joins the live slotmap sglang cluster as an independent node, resolves the
+  producer's slot layout (base/geometry/rkeys, no directory), and reads the
+  published KV pages back with one-shot bucket READs. Validated on L20: a real
+  sglang server published 7 KV pages (12 KiB each) into its slot region and a
+  second node read them all back with zero directory lookups. CI's
+  `sglang-e2e-gpu` job chains the two scripts.
 - **slotmap sglang e2e** — `tests/sglang/test_sglang_e2e.py` gained a
   `--mode {p2p,slotmap}` switch; the slotmap path launches a real sglang
   server with `mode=slotmap` and asserts KV pages flow through the

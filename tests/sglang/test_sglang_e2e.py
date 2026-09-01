@@ -106,6 +106,9 @@ def main():
                     help="PeerCache mode: p2p (directory) or slotmap (directory-free)")
     ap.add_argument("--no-server", action="store_true",
                     help="skip server launch; attach to an already-running one")
+    ap.add_argument("--keep-server", action="store_true",
+                    help="do NOT terminate the launched server at the end "
+                         "(for follow-up tests like the 2-node read)")
     args = ap.parse_args()
 
     py = os.environ.get("PEERCACHE_SGLANG_PY", sys.executable)
@@ -196,7 +199,7 @@ def main():
         print("PASS: KV pages were published into PeerCache through sglang HiCache (%s)"
               % args.mode)
 
-    if proc is not None:
+    if proc is not None and not args.keep_server:
         proc.terminate()
         try:
             proc.wait(timeout=15)
