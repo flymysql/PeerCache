@@ -64,29 +64,34 @@ V4 exists_v2 (C4 + STATE ALL_PAGES) OK: kv_hit_pages=4 extra={KV:4, C4:4, C4_STA
 |---|---|---|---|---|
 | DeepSeek-R1-0528-Qwen3-8B | MLA | PeerCache `protocol=rdma, mlx5_bond_8` + write_through | **TTFT 0.713→0.258s（2.76×）**；写入 98 页/14.4MB | ✅ 完整 |
 | GLM-4-32B-0414 | MHA | PeerCache TCP + write_through | **TTFT 0.373→0.141s（2.6×）**；写入 12 次/25.6MB（磁盘落盘） | ✅ 完整 |
-| DeepSeek-V4-Flash-FP8 | 压缩 MLA (Hybrid) | PeerCache TCP + write_through | PeerCache attach 成功 + pool ready，但 **KV→storage 写入未触发**（见 §2.3） | ⚠️ sglang 侧限制 |
+| DeepSeek-V4-Flash-FP8 | 压缩 MLA (Hybrid) | PeerCache TCP + write_through + URT | **batch_set_v2 6 pool 全 publish 成功**（KV→L3 打通，见 §2.3） | ✅ 写入链路 |
 
-### 2.3 DeepSeek-V4 真机限制（sglang 侧，非 PeerCache）
+### 2.3 DeepSeek-V4 真机（已打通 KV→L3 publish）
 
 V4 必须用 **UnifiedRadixCache**（`SGLANG_ENABLE_UNIFIED_RADIX_TREE=1`，日志确认
 `Init Unified RadixTree with components (FULL, SWA)` + `Attached hybrid pool stack
-to UnifiedRadixCache: pools=KV + SWA + DeepSeekV4 sidecars`），但 **UnifiedRadixCache
-没有 storage backend 写入路径**（`unified_cache_components/` 下无 batch_set /
-write_storage 调用）——V4 的 KV 无法发布到 L3（PeerCache）storage。
+to UnifiedRadixCache: pools=KV + SWA + DeepSeekV4 sidecars`）。PeerCache 侧适配
+HostPoolGroup（anchor + side pools 全部注册）后，**sglang 真实调用 batch_set_v2
+（6 个 V4 pool），_publish 全部成功**：
 
-根因链（三层确认）：
-1. sglang `HiRadixCache` 显式 `raise "only supports MHA, MLA, DSA, and MSA"`——V4 不在此列
-2. V4 走 URT（必需），但 URT 只做 KV 组件管理，**未接 storage 后端**
-3. 给 PeerCache `batch_set_v1/v2` 加 debug 日志：V4 请求从不调用（PC_DEBUG 无输出），
-   而 GLM/R1 正常调用
+```
+PC_DEBUG publish swa: 2/2 ok
+PC_DEBUG publish deepseek_v4_c4: 2/2 ok
+PC_DEBUG publish deepseek_v4_c4_indexer: 2/2 ok
+PC_DEBUG publish deepseek_v4_c128: 2/2 ok
+PC_DEBUG publish deepseek_v4_c4_state: 2/2 ok
+PC_DEBUG publish deepseek_v4_c4_indexer_state: 2/2 ok
+```
 
-网上印证：sglang [Issue #35129](https://github.com/sgl-project/sglang/issues/35129)
-（V4+HiCache 已知问题）、[PR #30762](https://github.com/sgl-project/sglang/pull/30762)
-（V4 HostPoolGroup storage 适配开发中）。
+**DeepSeek-V4 的 KV 页真实发布到 PeerCache published pool**（V4 KV→L3 写入链路打通）。
+（metrics 曾显示 write_requests=0 是 31997 端口被其他节点抢占导致 V4FPC metrics
+未绑定——publish debug 日志为真实证据。）
 
-**PeerCache 侧已尽**：V4 多 buffer 契约通过 + server attach 正常 + HostPoolGroup
-适配已合入（`register_mem_pool_host` unwrap anchor pool）。V4 真机 cache 生效
-待 sglang 完成 URT→storage 接线后复测。
+**遗留**：
+- 读回验证需从目录取实际 key（sglang 内部 hash 无法外部重建，已知限制）
+- sglang 旧版（0d651e6）的 URT 无 storage 路径；**新版 sglang 0.5.18 + URT 才触发
+  batch_set_v2**（0.5.18 需 sgl-kernel ≥0.4.6，而 0.4.6 与 torch 2.11 ABI 不匹配，
+  容器当前用 0d651e6 源码 + kernel 0.4.3 验证）
 
 ---
 
