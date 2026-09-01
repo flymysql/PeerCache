@@ -7,6 +7,14 @@ All notable changes to PeerCache are documented here. The format is based on
 ## [Unreleased]
 
 ### Added
+- **Slotmap mode docs** — `docs/slotmap.md` (architecture, seqlock header,
+  config reference, verified results, p2p comparison) and a README slotmap
+  section; `mkdocs.yml` nav entry.
+- **RDMA build verification** — the C++ data plane compiles against real
+  libibverbs (`HAS_RDMA=True`, full suite passes); on NIC-less machines the
+  engine falls back to TCP with a clear log line. Documented in README Test
+  section and `docs/slotmap.md` roadmap; a cross-host RoCE measurement
+  remains the final production validation.
 - **2-node slotmap cross-node read e2e** — `tests/sglang/test_sglang_e2e.py`
   gained `--keep-server`; new `tests/sglang/test_sglang_2node_slotmap_read.py`
   joins the live slotmap sglang cluster as an independent node, resolves the
