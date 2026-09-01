@@ -724,12 +724,17 @@ class PeerCacheStore(HiCacheStorage):
 
         DeepSeek-V4 HiCache passes a HostPoolGroup (anchor KV pool + side
         pools: full/swa/c4/c128/state) instead of a single HostKVCache.
-        Unwrap to the anchor pool so recv-MR registration and
-        get_page_buffer_meta keep working."""
+        Unwrap to the anchor pool for recv-MR registration, and register
+        every pool (anchor + sidecars) so v2 batch_set/get can resolve
+        them by name."""
         if hasattr(mem_pool_host, "get_entry") and hasattr(mem_pool_host, "entries"):
             anchor = mem_pool_host.anchor_entry
             self._host_pool_group = mem_pool_host
-            self._registered_pool_names = [str(e.name) for e in mem_pool_host.entries]
+            self._registered_pool_names = []
+            for entry in mem_pool_host.entries:
+                name = str(entry.name)
+                self.registered_pools[name] = entry.host_pool
+                self._registered_pool_names.append(name)
             mem_pool_host = anchor.host_pool
             logger.info(
                 "peercache: unwrapped HostPoolGroup -> anchor %s (pools: %s)",
