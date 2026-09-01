@@ -87,17 +87,22 @@ PC_DEBUG publish deepseek_v4_c4_indexer_state: 2/2 ok
 未绑定——publish debug 日志为真实证据。）
 
 **读回验证（flush-then-same-prompt）**：`/flush_cache` 清空 L2 radix cache 后请求
-相同前缀，结果 **cached=0（L3-MISS）**——server 日志证实 **batch_get_v2 从未被调用
-（0 次），batch_set_v2 调用 6 次**。即 sglang 的 V4 HiCache storage **写入路径已接
-（batch_set_v2），读取路径未接（batch_get_v2 从不调用）**——L2 miss 后 sglang 全量
-prefill，不回查 L3。这是 sglang 对 V4（URT）storage read 路径未实现的限制，
-**非 PeerCache 问题**（PeerCache 的 batch_get_v2 接口经契约验证跨节点字节一致正确）。
+相同前缀，结果 **cached=0（L3-MISS）**——server 日志证实 **batch_get_v1/v2 从未被调用
+（0 次），batch_set_v2 调用 6 次**。
 
-**遗留**：
-- V4 读回待 sglang 完成 URT→storage read 接线（写入已通）
-- sglang 旧版（0d651e6）的 URT 无 storage 路径；**新版 sglang 0.5.18 + URT 才触发
-  batch_set_v2**（0.5.18 需 sgl-kernel ≥0.4.6，而 0.4.6 与 torch 2.11 ABI 不匹配，
-  容器当前用 0d651e6 源码 + kernel 0.4.3 验证）
+**根因（版本问题，非 PeerCache）**：容器 sglang（0d651e6，8 月 13 日前的旧版）
+的 **URT（UnifiedRadixCache）只有 storage 写入，没有 storage 读回（prefetch）实现**
+——`hiradix_cache.prefetch_from_storage` 存在但 V4 走 URT，旧版 URT 无读回；
+**最新 sglang main 的 URT（unified_radix_cache.py 重构后）有完整 storage read**
+（`query_storage_hit_length` / `storage_hit_query` / `prefetch_from_storage`）。
+
+**新版 sglang 要求 torch==2.13.0**（0.5.18 与 main 均如此），容器 torch 2.11 不满足；
+升级 torch 2.13 需配套 nccl≥2.31（已装）+ 匹配 torchvision（0.26 与 2.13 ABI 不匹配），
+**容器无法快速搭出与线上（torch 2.13 + 新版 sglang）等同的环境**。
+
+**结论**：V4 写入在容器旧版 sglang 真机打通（batch_set_v2 6 pool publish 全成功）；
+**V4 读回需新版 sglang（URT storage read）**——建议在 torch 2.13 + 新版 sglang 的
+线上环境验证。PeerCache 侧接口（batch_get_v1/v2 契约级跨节点字节一致）已就绪。
 
 ### 2.4 DSA / Mamba / Draft 真机状态
 
