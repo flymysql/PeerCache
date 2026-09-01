@@ -68,16 +68,25 @@ V4 exists_v2 (C4 + STATE ALL_PAGES) OK: kv_hit_pages=4 extra={KV:4, C4:4, C4_STA
 
 ### 2.3 DeepSeek-V4 真机限制（sglang 侧，非 PeerCache）
 
-V4 走 **HybridCacheController**（日志 `Hybrid swa model`），其 HiCache storage 写入路径
-在 sglang main **未接线**：给 PeerCache 的 `batch_set_v1/v2` 加 debug 日志后，V4 请求
-**从不调用这两个接口**（PC_DEBUG 无输出），而 GLM/R1 正常调用。根因：
+V4 必须用 **UnifiedRadixCache**（`SGLANG_ENABLE_UNIFIED_RADIX_TREE=1`，日志确认
+`Init Unified RadixTree with components (FULL, SWA)` + `Attached hybrid pool stack
+to UnifiedRadixCache: pools=KV + SWA + DeepSeekV4 sidecars`），但 **UnifiedRadixCache
+没有 storage backend 写入路径**（`unified_cache_components/` 下无 batch_set /
+write_storage 调用）——V4 的 KV 无法发布到 L3（PeerCache）storage。
 
-- sglang `HiRadixCache.__init__` 明确 `raise ValueError("HiRadixCache only supports MHA, MLA, DSA, and MSA models")`——V4 不在此列
-- V4 走 HybridCacheController + `DeepSeekV4TokenToKVPool`（full/swa/c4/c128/c4_state/c128_state 6 pools），storage 写入未接到 `batch_set_v2`
-- 网上印证：sglang [Issue #35129](https://github.com/sgl-project/sglang/issues/35129)（V4+HiCache 已知问题）、[PR #30762](https://github.com/sgl-project/sglang/pull/30762)（V4 HostPoolGroup storage 适配开发中）
+根因链（三层确认）：
+1. sglang `HiRadixCache` 显式 `raise "only supports MHA, MLA, DSA, and MSA"`——V4 不在此列
+2. V4 走 URT（必需），但 URT 只做 KV 组件管理，**未接 storage 后端**
+3. 给 PeerCache `batch_set_v1/v2` 加 debug 日志：V4 请求从不调用（PC_DEBUG 无输出），
+   而 GLM/R1 正常调用
 
-**PeerCache 侧已尽**：V4 多 buffer 契约通过 + server attach 正常 + 增加了 HostPoolGroup
-适配（unwrap anchor pool）。V4 真机 cache 生效待 sglang 完成 V4→storage 接线后复测。
+网上印证：sglang [Issue #35129](https://github.com/sgl-project/sglang/issues/35129)
+（V4+HiCache 已知问题）、[PR #30762](https://github.com/sgl-project/sglang/pull/30762)
+（V4 HostPoolGroup storage 适配开发中）。
+
+**PeerCache 侧已尽**：V4 多 buffer 契约通过 + server attach 正常 + HostPoolGroup
+适配已合入（`register_mem_pool_host` unwrap anchor pool）。V4 真机 cache 生效
+待 sglang 完成 URT→storage 接线后复测。
 
 ---
 
