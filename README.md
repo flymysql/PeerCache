@@ -21,6 +21,10 @@ but **without** the centralized `master` + `metadata` services. Instead it uses:
 - **A consistent-hash distributed directory (DHT)** — the mapping
   `key -> {data_node, remote_addr, rkey, length}` is sharded across all nodes by
   hashing the key. There is no central metadata store.
+- **Slotmap mode (directory-free)** — an alternative placement mode
+  (`"mode":"slotmap"`) where a key maps to a fixed physical slot by hashing, so a
+  reader issues **one** one-sided RDMA READ of the whole N-way bucket with no
+  metadata lookup at all (see [docs/slotmap.md](docs/slotmap.md)).
 - **Data stays local on write** — `set()` copies the page into a node-local
   *published pool* (a host memcpy, no network, no master) and pushes only a tiny
   location record to the directory.
@@ -34,6 +38,11 @@ but **without** the centralized `master` + `metadata` services. Instead it uses:
   later read (locally or by a remote reader).
 - **Built-in monitoring** — Prometheus `/metrics` + an embedded HTML dashboard
   (default port `31997`): hit rate, throughput, latency p50/p99, mem/disk usage.
+
+> **Maturity**: lab-ready / pre-production. Control plane, both placement modes,
+> SGLang v1+v2 integration, and the RDMA build are verified; cross-host RoCE
+> numbers on current code and the upstream sglang registration are the remaining
+> steps. See [docs/architecture.md](docs/architecture.md#maturity).
 
 ## Architecture
 

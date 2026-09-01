@@ -86,6 +86,35 @@ python -m sglang.launch_server \
 > (NVMe). Set `"disk_enabled": false` to keep everything in the memory pool only.
 > Total capacity per node ≈ `global_segment_size` (RAM) + `disk_size` (disk).
 
+### 2b. Slotmap mode (directory-free, optional)
+
+Set `"mode": "slotmap"` to drop the distributed directory: a key maps to a
+fixed physical slot by hashing, so readers issue **one** one-sided RDMA READ
+(no metadata lookup). Requires `slot_max_page_bytes` ≥ your KV page size.
+
+```bash
+python -m sglang.launch_server \
+  --model-path <model> \
+  --enable-hierarchical-cache \
+  --hicache-storage-backend dynamic \
+  --hicache-storage-backend-extra-config '{
+    "backend_name": "peercache",
+    "module_path":  "peercache.store",
+    "class_name":   "PeerCacheStore",
+    "discovery_addr": "NODE0_IP:31998",
+    "protocol": "rdma",
+    "mode": "slotmap",
+    "slot_max_page_bytes": 262144,
+    "slot_ways": 4,
+    "slot_num_buckets": 0,
+    "device_name": "mlx5_0"
+  }'
+```
+
+> slotmap has no published pool, so `pool_keys` is 0 by design; watch
+> `write_requests` / `bytes_written` instead. See
+> [slotmap.md](slotmap.md) for the full design, tuning, and maturity notes.
+
 ## 3. Centralized mode (optional — dedicated KV cache servers)
 
 By default PeerCache is **P2P**: each SGLang node publishes KV into its own local
