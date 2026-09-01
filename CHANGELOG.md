@@ -6,6 +6,8 @@ All notable changes to PeerCache are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.8.3] - 2026-09-01
+
 ### Added
 - **Docs: architecture refresh + maturity statement** — `docs/architecture.md`
   now opens with a placement-modes overview (directory `p2p` vs directory-free
