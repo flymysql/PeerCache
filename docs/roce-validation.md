@@ -67,7 +67,6 @@ V4 exists_v2 (C4 + STATE ALL_PAGES) OK: kv_hit_pages=4 extra={KV:4, C4:4, C4_STA
 | DeepSeek-V4-Flash-FP8 | 压缩 MLA (Hybrid) | PeerCache TCP + write_through + URT | **batch_set_v2 6 pool 全 publish 成功**（KV→L3 打通，见 §2.3） | ✅ 写入链路 |
 
 ### 2.3 DeepSeek-V4 真机（已打通 KV→L3 publish）
-
 V4 必须用 **UnifiedRadixCache**（`SGLANG_ENABLE_UNIFIED_RADIX_TREE=1`，日志确认
 `Init Unified RadixTree with components (FULL, SWA)` + `Attached hybrid pool stack
 to UnifiedRadixCache: pools=KV + SWA + DeepSeekV4 sidecars`）。PeerCache 侧适配
@@ -87,11 +86,27 @@ PC_DEBUG publish deepseek_v4_c4_indexer_state: 2/2 ok
 （metrics 曾显示 write_requests=0 是 31997 端口被其他节点抢占导致 V4FPC metrics
 未绑定——publish debug 日志为真实证据。）
 
+**读回验证**：契约级 batch_get_v2 对 V4 C4/C128 多 buffer 跨节点字节一致已通过；
+真机读回受限于 sglang 内部 key hash 无法从外部重建（外部节点无法枚举 V4 server
+发布的 key），且外部节点 join 会扰动运行中 server 的 ring。
+
 **遗留**：
 - 读回验证需从目录取实际 key（sglang 内部 hash 无法外部重建，已知限制）
 - sglang 旧版（0d651e6）的 URT 无 storage 路径；**新版 sglang 0.5.18 + URT 才触发
   batch_set_v2**（0.5.18 需 sgl-kernel ≥0.4.6，而 0.4.6 与 torch 2.11 ABI 不匹配，
   容器当前用 0d651e6 源码 + kernel 0.4.3 验证）
+
+### 2.4 DSA / Mamba / Draft 真机状态
+
+| 架构 | 契约级 | 真机尝试 | 结论 |
+|---|---|---|---|
+| **DSA**（DeepSeek-V3.2） | ✅ INDEXER sidecar ALL_PAGES 跨节点正确 | 643GB 模型，单机 8×H20（0.8 配额=620GB）放不下，TP2/TP8 均 OOM | ⚠️ 真机受模型大小限制，需 ≥8 卡或更高配额集群 |
+| **Mamba** | ✅ TRAILING_PAGES 语义正确 | 模型库无独立 Mamba 权重 | ⚠️ 真机需 Mamba 权重 |
+| **Draft**（投机解码） | ✅ MHA/MLA draft 双/单组件正确 | 模型库无投机 draft 模型对 | ⚠️ 真机需 draft 模型 |
+
+> DSA/Mamba/Draft 的 PeerCache 接口（sidecar pool、hit policy、多 buffer）在
+> 真实 sglang main 类型上跨节点字节一致已验证；真机 e2e 需对应模型权重（当前
+> 模型库仅有 V3.2 643GB 无小 DSA、无 Mamba/Draft 权重）。
 
 ---
 
@@ -226,13 +241,16 @@ warm1: 0.258s  cached=1762/1763
 
 | 验证项 | 结果 |
 |---|---|
-| 6 种模型架构接口兼容（MHA/MLA/DSA/Mamba/DeepSeek-V4/Draft） | ✅ 全部通过 |
+| 6 种模型架构接口兼容（MHA/MLA/DSA/Mamba/DeepSeek-V4/Draft） | ✅ 全部通过（契约级） |
+| **DeepSeek-V4 真机 KV→L3 发布**（batch_set_v2 6 pool 全 publish ok） | ✅ 写入打通 |
+| **DeepSeek-V4 真机读回** | ⚠️ 契约级跨节点字节一致通过；真机受 key hash 不可外部重建限制 |
 | DeepSeek-V4 压缩 MLA 多 pool + 多 buffer 跨节点字节一致 | ✅ |
 | RDMA one-sided READ 真机性能（单卡 5.86 GB/s 峰值） | ✅ |
 | sglang + PeerCache RDMA 端到端（真实请求写入 98 页/14.4MB） | ✅ |
 | 跨主机 PeerCache 集群（TCP 数据面，100% 命中） | ✅ |
 | TTFT 缓存收益（大前缀 2.76× 提升） | ✅ |
 | 跨主机 RDMA（RoCE 跨网段） | ⚠️ 受网络规划限制（RoCE 网段隔离），需同 VLAN 部署 |
+| DSA / Mamba / Draft 真机 e2e | ⚠️ 需对应模型权重（V3.2 643GB 单机放不下，模型库无 Mamba/Draft） |
 
 ### 7.2 客户推广要点
 
