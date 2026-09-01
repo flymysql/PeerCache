@@ -720,7 +720,21 @@ class PeerCacheStore(HiCacheStorage):
         return present
 
     def register_mem_pool_host(self, mem_pool_host):
-        """SGLang v1 registration: one KV host pool."""
+        """SGLang v1 registration: one KV host pool.
+
+        DeepSeek-V4 HiCache passes a HostPoolGroup (anchor KV pool + side
+        pools: full/swa/c4/c128/state) instead of a single HostKVCache.
+        Unwrap to the anchor pool so recv-MR registration and
+        get_page_buffer_meta keep working."""
+        if hasattr(mem_pool_host, "get_entry") and hasattr(mem_pool_host, "entries"):
+            anchor = mem_pool_host.anchor_entry
+            self._host_pool_group = mem_pool_host
+            self._registered_pool_names = [str(e.name) for e in mem_pool_host.entries]
+            mem_pool_host = anchor.host_pool
+            logger.info(
+                "peercache: unwrapped HostPoolGroup -> anchor %s (pools: %s)",
+                getattr(anchor, "name", "?"), self._registered_pool_names,
+            )
         self.mem_pool_host = mem_pool_host
         self._register_recv(mem_pool_host)
         self._ensure_published_pool()
