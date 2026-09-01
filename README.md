@@ -177,6 +177,23 @@ When several sglang deployments share one PeerCache cluster, set a unique
 
 All nodes of one deployment must use the same `prefix`.
 
+### Slotmap mode (directory-free)
+
+Set `"mode":"slotmap"` to drop the distributed directory: a key maps to its
+owner by the ring and to a **fixed physical slot** by hashing, so a reader
+issues **one one-sided RDMA READ of the whole N-way bucket** with no metadata
+lookup. See [docs/slotmap.md](docs/slotmap.md).
+
+```bash
+--hicache-storage-backend-extra-config \
+  '{"backend_name":"peercache","module_path":"peercache.store","class_name":"PeerCacheStore",
+    "discovery_addr":"NODE0_IP:31998","protocol":"rdma","mode":"slotmap",
+    "slot_max_page_bytes":262144,"slot_ways":4,"slot_num_buckets":0}'
+```
+
+> slotmap has no published pool / directory, so `pool_keys` is 0 by design;
+> `write_requests` / `bytes_written` are the correct health signals.
+
 ### SGLang integration tests
 
 - `tests/sglang/test_sglang_contract.py` — contract vs a real sglang install
@@ -234,6 +251,23 @@ peercache-bench suite --device-name mlx5_0 --layout mla --page-size 131072 \
 pip install -e ".[test]"
 pytest -q
 ```
+
+### RDMA build verification
+
+The C++ data plane (raw libibverbs: `rdma_context`, `rdma_endpoint`,
+`connection_manager`, `transfer_engine`) compiles when `libibverbs-dev` /
+`librdmacm-dev` are present; `python -c "from peercache import _peercache;
+print(_peercache.HAS_RDMA)"` prints `True`. On a machine without an RDMA NIC
+the engine still loads and falls back to TCP with a clear log line:
+
+```
+peercache: RDMA transport unavailable (no RDMA devices found); using TCP fallback
+```
+
+Publishable one-sided-RDMA numbers require real RoCE/IB hardware — see
+[performance.md](docs/performance.md) for the reference methodology and
+[python/peercache/bench/README.md](python/peercache/bench/README.md) for the
+`peercache-bench serve`/`drive` two-node harness.
 
 ## Maintainer setup (one-time)
 

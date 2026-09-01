@@ -36,6 +36,7 @@ nav:
   - Multi-node Demo: demo-multinode.md
   - Positioning & Comparison: positioning.md
   - Architecture: architecture.md
+  - Slotmap Mode: slotmap.md
   - SDK Reference: sdk.md
   - Benchmarks: benchmarks.md
   - Performance Baseline: performance.md
@@ -85,3 +86,4 @@ extra:
   social:
     - icon: fontawesome/brands/github
       link: https://github.com/flymysql/PeerCache
+
