@@ -7,6 +7,14 @@ All notable changes to PeerCache are documented here. The format is based on
 ## [Unreleased]
 
 ### Added
+- **Docs: architecture refresh + maturity statement** — `docs/architecture.md`
+  now opens with a placement-modes overview (directory `p2p` vs directory-free
+  `slotmap`) and marks the directory / two-MR / write / read sections as
+  p2p-specific with slotmap counterparts; adds a **Maturity** section
+  (verified vs remaining-validation table). `docs/index.md`, `README.md` and
+  `docs/getting-started.md` gained slotmap pointers and the same
+  lab-ready/pre-production maturity note; `docs/slotmap.md` gained a Maturity
+  section.
 - **Slotmap mode docs** — `docs/slotmap.md` (architecture, seqlock header,
   config reference, verified results, p2p comparison) and a README slotmap
   section; `mkdocs.yml` nav entry.

@@ -132,6 +132,17 @@ design, not a bug.
   the published pages back with one-shot bucket READs — 7 pages × 12 KiB all
   recovered, 256 bucket reads OK.
 
+## Maturity
+
+slotmap is **functional and integration-tested, pre-production for
+performance**: the addressing design, seqlock gate, local + cross-node
+read/write, and the real-sglang-server integration are all verified above,
+but the one-sided RDMA path has only been *built* (compiles against
+libibverbs, `HAS_RDMA=True`, full suite passes) — it has **not** yet been
+measured on cross-host RoCE hardware. `peercache-bench` also does not drive
+slotmap yet (p2p only), so there are no published slotmap throughput numbers.
+See the overall [maturity notes](architecture.md#maturity).
+
 ## Limitations / roadmap
 
 - **One size class**: `slot_max_page_bytes` is global; a page larger than it

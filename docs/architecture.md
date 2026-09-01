@@ -1,5 +1,25 @@
 # Architecture
 
+## Placement modes: directory (`p2p`) vs directory-free (`slotmap`)
+
+PeerCache has **two placement modes**, selectable via `mode` in the backend
+extra config. They share the control plane (discovery, membership, ring,
+transports, metrics, disk tier) but differ in *how a reader locates a page*:
+
+| | `p2p` (default) | `slotmap` |
+|---|---|---|
+| location record | distributed directory (`key → {node,addr,rkey,len}`), sharded by consistent hash | **none** — a key maps to a fixed physical slot by hashing |
+| read path | directory lookup RPC **+** one-sided RDMA READ | **one** one-sided RDMA READ of the whole N-way bucket |
+| metadata resharding | yes (on membership change) | no (placement is a pure function of ring + key hash) |
+| page sizes | any | one size class (`slot_max_page_bytes`) |
+| published pool (LRU) | yes | no (slots are the store) |
+| best for | mixed/hot workloads, small clusters | uniform pages, latency-sensitive reads, large clusters |
+
+The rest of this page describes the shared machinery first (control/data
+plane, two-MR model, transports, disk tier, concurrency) and then the
+per-mode specifics (directory vs slot region). A dedicated walkthrough of the
+slotmap mode lives in [slotmap.md](slotmap.md).
+
 ## Primary use case: PD-disaggregated SGLang inference
 
 PeerCache is built for **prefill/decode (PD) disaggregated** SGLang deployments,
@@ -22,8 +42,12 @@ flowchart LR
     P0 ==>|"3 one-sided RDMA READ (zero copy)"| D0
 ```
 
+In `slotmap` mode the two directory RPCs disappear: the reader computes
+`owner = ring(key)` and `slot = hash(key)` locally and issues the one-sided
+READ directly.
+
 - The **KV data stays on the prefill node** (the producer). Only a small location
-  record is published to the directory.
+  record is published to the directory (in `p2p` mode).
 - The **decode node pulls** the KV via one-sided RDMA READ straight into its own
   registered host buffer.
 - It also works for the non-disaggregated case (any node can be producer and
@@ -51,7 +75,7 @@ flowchart TB
     STORE --> dp
 ```
 
-## Two-MR model
+## Two-MR model (p2p mode)
 
 SGLang's host KV buffer is the L2 tier and is evicted/overwritten by HiCache, so
 its address cannot be published into the directory directly (dangling reference).
@@ -65,7 +89,12 @@ Each node therefore registers **two memory regions**:
    deletes the corresponding directory entry, so a published address stays valid
    until it is evicted.
 
-## Write path
+> **slotmap mode** replaces the published pool MR with a **slot region MR** (one
+> fixed region, `num_buckets × ways × slot_stride`, registered once). Pages are
+> written into pre-determined slots instead of an LRU pool, so there is no
+> directory entry to publish or delete; see [slotmap.md](slotmap.md).
+
+## Write path (p2p mode)
 
 ```mermaid
 sequenceDiagram
@@ -79,7 +108,11 @@ sequenceDiagram
 Write cost = one local memcpy + one small directory RPC. No master, no network
 copy of the KV data.
 
-## Read path
+> **slotmap mode**: write = one local memcpy into the key's slot (own key) or
+> one batched READ-modify-WRITE of the target bucket (remote key) — no directory
+> PUT at all.
+
+## Read path (p2p mode)
 
 ```mermaid
 sequenceDiagram
@@ -94,6 +127,10 @@ sequenceDiagram
 
 If the directory says the data lives on the reader itself, the read degrades to a
 local `memcpy` with no network involved.
+
+> **slotmap mode**: the directory step disappears — `owner = ring(key)`,
+> `slot = bucket_hash(key)`, one one-sided READ of the bucket, header-validated
+> locally. Same zero-copy landing, one fewer RPC per read.
 
 ## Copy counts
 
@@ -176,7 +213,10 @@ rates via `rate()`), eviction/promote counters, and operation latency summaries
 move it with `metrics_port`, or turn off just the HTML page with
 `metrics_dashboard`.
 
-## Consistent-hash directory
+## Consistent-hash directory (p2p mode)
+
+The directory is the location store of `p2p` mode (`slotmap` mode has no
+directory at all — see below).
 
 - Each node hosts one **shard** of the directory: a local `key -> DataLocation`
   map. The union of all shards is the directory; there is no central store.
@@ -184,6 +224,26 @@ move it with `metrics_port`, or turn off just the HTML page with
   writers and readers independently agree on where a key's entry lives.
 - `directory_replicas > 1` writes each entry to the next N owners for HA; reads
   fall back through replicas.
+
+## Slot region (slotmap mode)
+
+In `mode="slotmap"` the directory is gone. Each node instead owns a **fixed slot
+region** MR of `num_buckets × ways × slot_stride` bytes and advertises
+`(base_addr, geometry, rkeys)` once via a layout RPC; peers cache that layout
+and never ask again.
+
+- `key -> owner`: the same consistent-hash ring (`data_owner_all`).
+- `key -> bucket`: an independent hash (`bucket_hash`) over the key.
+- `key -> way`: N-way associativity — `pick_way` prefers an empty slot, then the
+  same key (overwrite), then the oldest sequence (evict).
+- Every slot starts with a versioned **seqlock header** (`key_hash128`, payload
+  length, sequence). `slot_matches` is the single gate: a reader never returns
+  another key's page, a torn page (odd seq), or a wrong-length page — a miss is
+  always *clean*.
+
+So the read path becomes: `owner = ring(key)` → `bucket = bucket_hash(key)` →
+one one-sided RDMA READ of the bucket → header-validated memmove on hit. No
+metadata RPC, no resharding of location records.
 
 ## Connection management
 
@@ -240,3 +300,43 @@ read concurrency to a single hot peer.
   node loss does not drop a shard's location records before the ring re-shards
   (each producer re-publishes its pages on a membership change). Worst case a
   resolve returns a miss and SGLang recomputes — safe degradation.
+
+## Maturity
+
+PeerCache is **functional and integration-tested, but not yet a production
+default** for SGLang deployments. Concretely:
+
+### What is solid (verified)
+
+- **Control plane correctness** — discovery (embedded multi-master),
+  consistent-hash ring, directory sharding/resharding, disk tier (L4),
+  metrics, TCP fallback transport: covered by the repo test suite
+  (`tests/`, 77 tests) and exercised end-to-end.
+- **SGLang integration, both modes** — PeerCacheStore subclasses sglang's
+  real `HiCacheStorage`; v1 and v2 (sidecar pools: DSA INDEXER, Mamba/SWA
+  TRAILING_PAGES, DeepSeek-V4 multi-buffer, Draft MHA/MLA) contract tests
+  pass against sglang main-branch types; a real sglang server + Qwen2.5-0.5B
+  publishes KV into PeerCache on L20 (`tests/sglang/`).
+- **slotmap cross-node read** — a real sglang server's slot region was read
+  back page-by-page by an independent node with zero directory lookups
+  (`tests/sglang/test_sglang_2node_slotmap_read.py`).
+- **RDMA build** — the C++ data plane compiles against libibverbs
+  (`HAS_RDMA=True`, full suite passes); NIC-less machines fall back to TCP
+  cleanly.
+
+### What still needs production validation
+
+| item | status | blocker |
+|---|---|---|
+| **Cross-host RoCE one-sided READ** | methodology + harness exist (`peercache-bench serve`/`drive`, see `performance.md`); numbers were measured for `p2p` | need a 2-host RoCE cluster to re-run for the current code and for `slotmap` (bench does not drive slotmap yet) |
+| **DSA / Mamba / DeepSeek-V4 / Draft real-model e2e** | interface contract verified | need those model weights + GPU to run a full server |
+| **Official sglang registration** | PR kit ready (`sglang-pr/`), `create_backend("peercache")` path verified | upstream review / merge |
+| **slotmap production tuning** | geometry defaults work on a 0.5B model | sizing `slot_max_page_bytes` / `slot_ways` / `slot_num_buckets` for real page sizes and hit-rate targets |
+| **`buffer_only` host mode** | not in sglang 0.5.9 (main only) | sglang release with `--hicache-host-memory-mode buffer_only` to force L3 reads in e2e |
+
+### Bottom line
+
+Treat PeerCache as **pre-production / lab-ready**: the design is validated
+end-to-end (control plane, both placement modes, sglang integration, RDMA
+build), but a production adoption should wait for the cross-host RoCE numbers
+and the upstream sglang registration to land.

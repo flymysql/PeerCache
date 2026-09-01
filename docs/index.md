@@ -88,12 +88,25 @@ reproduce commands.
   location record to the directory.
 - **One-sided RDMA READ on read** — `get()` looks up the directory, then issues a
   zero-copy `IBV_WR_RDMA_READ` straight into SGLang's registered host buffer.
+- **Slotmap mode (directory-free)** — an alternative placement mode
+  (`"mode":"slotmap"`) where a key maps to a fixed physical slot by hashing, so a
+  reader issues **one** one-sided READ of the whole N-way bucket with no metadata
+  lookup at all. See [slotmap.md](slotmap.md).
 - **Disk persistence tier (L4)** — pages evicted from memory spill to disk
   (default `/data/peercache/`, `100GB`) and are promoted back into the pool on a
   later read, locally or by a remote reader.
 - **Built-in monitoring** — a Prometheus `/metrics` endpoint plus an embedded HTML
   dashboard (default port `31997`): hit rate, throughput, latency p50/p99,
   memory/disk usage, and more.
+
+## Maturity
+
+PeerCache is **lab-ready / pre-production**: the control plane, both placement
+modes, the SGLang integration (v1 + v2 sidecar pools), and the RDMA build are
+all verified (see [architecture.md](architecture.md#maturity)). Two things
+remain before production adoption: cross-host RoCE one-sided-READ numbers on
+current code (methodology in [performance.md](performance.md)) and landing the
+upstream sglang registration ([sglang-pr](../sglang-pr/README.md)).
 
 ## Next steps
 
