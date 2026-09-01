@@ -60,10 +60,24 @@ V4 exists_v2 (C4 + STATE ALL_PAGES) OK: kv_hit_pages=4 extra={KV:4, C4:4, C4_STA
 
 ### 2.2 真机级（真实 sglang server + 真实请求）
 
-| 模型 | 架构 | 启动参数 | 结果 |
-|---|---|---|---|
-| DeepSeek-R1-0528-Qwen3-8B | MLA | `--hicache-storage-backend dynamic` + PeerCache `protocol=rdma, device=mlx5_bond_8` | ✅ **PeerCacheStore up + ready**；3 请求写入 **8 次 / 14.4MB / 98 pages** |
-| GLM-4-32B-0414 | MHA | 同上（`protocol=tcp` 单机） | ✅ **PeerCacheStore up（node=GLMSGLANG）+ published pool 2GB**；真实请求 cached_tokens=43 |
+| 模型 | 架构 | 启动参数 | cache 生效证据 | 结果 |
+|---|---|---|---|---|
+| DeepSeek-R1-0528-Qwen3-8B | MLA | PeerCache `protocol=rdma, mlx5_bond_8` + write_through | **TTFT 0.713→0.258s（2.76×）**；写入 98 页/14.4MB | ✅ 完整 |
+| GLM-4-32B-0414 | MHA | PeerCache TCP + write_through | **TTFT 0.373→0.141s（2.6×）**；写入 12 次/25.6MB（磁盘落盘） | ✅ 完整 |
+| DeepSeek-V4-Flash-FP8 | 压缩 MLA (Hybrid) | PeerCache TCP + write_through | PeerCache attach 成功 + pool ready，但 **KV→storage 写入未触发**（见 §2.3） | ⚠️ sglang 侧限制 |
+
+### 2.3 DeepSeek-V4 真机限制（sglang 侧，非 PeerCache）
+
+V4 走 **HybridCacheController**（日志 `Hybrid swa model`），其 HiCache storage 写入路径
+在 sglang main **未接线**：给 PeerCache 的 `batch_set_v1/v2` 加 debug 日志后，V4 请求
+**从不调用这两个接口**（PC_DEBUG 无输出），而 GLM/R1 正常调用。根因：
+
+- sglang `HiRadixCache.__init__` 明确 `raise ValueError("HiRadixCache only supports MHA, MLA, DSA, and MSA models")`——V4 不在此列
+- V4 走 HybridCacheController + `DeepSeekV4TokenToKVPool`（full/swa/c4/c128/c4_state/c128_state 6 pools），storage 写入未接到 `batch_set_v2`
+- 网上印证：sglang [Issue #35129](https://github.com/sgl-project/sglang/issues/35129)（V4+HiCache 已知问题）、[PR #30762](https://github.com/sgl-project/sglang/pull/30762)（V4 HostPoolGroup storage 适配开发中）
+
+**PeerCache 侧已尽**：V4 多 buffer 契约通过 + server attach 正常 + 增加了 HostPoolGroup
+适配（unwrap anchor pool）。V4 真机 cache 生效待 sglang 完成 V4→storage 接线后复测。
 
 ---
 
