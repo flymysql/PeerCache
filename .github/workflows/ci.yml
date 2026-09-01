@@ -129,3 +129,17 @@ jobs:
           PEERCACHE_E2E_MODEL: Qwen/Qwen2.5-0.5B-Instruct
         run: python tests/sglang/test_sglang_e2e.py --mode slotmap
 
+      - name: Run 2-node slotmap cross-node read (live sglang server)
+        # Keep a slotmap sglang server up (--keep-server), drive shared-prefix
+        # requests into it, then have an independent PeerCache node read the
+        # published pages back from its slot region (one-shot bucket READ, no
+        # directory lookup).
+        env:
+          PEERCACHE_E2E_MODEL: Qwen/Qwen2.5-0.5B-Instruct
+          PEERCACHE_SGLANG_PY: python
+        run: |
+          python tests/sglang/test_sglang_e2e.py --mode slotmap --requests 2 --keep-server \
+            || true
+          python tests/sglang/test_sglang_2node_slotmap_read.py
+          pkill -f "sglang.launch_server" 2>/dev/null || true
+
