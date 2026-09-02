@@ -4,7 +4,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "peercache"
-version = "0.8.3"
+version = "0.8.4"
 description = "Peer-to-peer RDMA zero-copy L3 KV-cache backend for SGLang HiCache"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -40,5 +40,6 @@ testpaths = ["tests"]
 # SGLang integration tests need a real sglang install (contract) or a GPU
 # (e2e); they are run explicitly by CI (tests/sglang/) or locally.
 addopts = "--ignore=tests/sglang"
+
 
 
