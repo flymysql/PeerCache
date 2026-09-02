@@ -1,5 +1,23 @@
 # 架构
 
+## 放置模式：目录式（`p2p`）与免目录式（`slotmap`）
+
+PeerCache 有**两种放置模式**，通过后端 extra config 里的 `mode` 选择。两者共享控制面
+（服务发现、成员、ring、传输、监控、磁盘分层），但在*读取方如何定位一个页面*上不同：
+
+| | `p2p`（默认） | `slotmap` |
+|---|---|---|
+| 位置记录 | 分布式目录（`key → {node,addr,rkey,len}`），按一致性哈希分片 | **无** —— key 经哈希映射到固定物理槽 |
+| 读取路径 | 目录查询 RPC **+** 单边 RDMA READ | **一次**对整个 N-way 桶的单边 RDMA READ |
+| 元数据再分片 | 有（成员变更时） | 无（放置只是 ring + key 哈希的纯函数） |
+| 页面大小 | 任意 | 单一尺寸档（`slot_max_page_bytes`） |
+| 发布池（LRU） | 有 | 无（槽本身即存储） |
+| 最适合 | 混合/热点负载、小集群 | 统一大小页面、时延敏感读取、大集群 |
+
+本页先描述共享机制（控制/数据面、双 MR 模型、传输、磁盘分层、并发），再讲各模式的
+细节（目录 vs 槽区域）。slotmap 模式有专门的分步讲解，见
+[slotmap.md](slotmap.md)。
+
 ## 主要场景：PD 分离的 SGLang 推理
 
 PeerCache 专为 **prefill/decode（PD）分离**的 SGLang 部署而设计：prefill 与 decode
@@ -20,6 +38,9 @@ flowchart LR
     D0 -->|"2 GET 位置（极小 RPC）"| DIR
     P0 ==>|"3 单边 RDMA READ（零拷贝）"| D0
 ```
+
+在 `slotmap` 模式下这两次目录 RPC 消失了：读取方本地算出
+`owner = ring(key)` 与 `slot = hash(key)`，直接发起单边 READ。
 
 - **KV 数据留在 prefill 节点**（生产者）上，只把一条极小的位置记录发布到目录。
 - **decode 节点主动拉取** KV：单边 RDMA READ 直接落入它自己已注册的主机缓冲区。
@@ -47,7 +68,7 @@ flowchart TB
     STORE --> dp
 ```
 
-## 双 MR 模型
+## 双 MR 模型（p2p 模式）
 
 SGLang 的主机 KV 缓冲区是 L2 层，会被 HiCache 驱逐/覆盖，因此其地址不能直接发布到
 目录里（会成为悬空引用）。为此每个节点注册**两个内存区域（MR）**：
@@ -57,7 +78,11 @@ SGLang 的主机 KV 缓冲区是 L2 层，会被 HiCache 驱逐/覆盖，因此�
    页面 memcpy 进该池（节点本地、不走网络），并把 `addr + rkey + len` 发布到目录。
    从池中驱逐会删除对应的目录条目，因此已发布的地址在被驱逐前始终有效。
 
-## 写入路径
+> **slotmap 模式**用**槽区域 MR** 取代发布池 MR（一个固定区域，大小
+> `num_buckets × ways × slot_stride`，只注册一次）。页面写入预先确定的槽而不是 LRU
+> 池，因此既没有要发布的目录条目、也没有要删除的目录条目；见 [slotmap.md](slotmap.md)。
+
+## 写入路径（p2p 模式）
 
 ```mermaid
 sequenceDiagram
@@ -70,7 +95,10 @@ sequenceDiagram
 
 写入开销 = 一次本地 memcpy + 一次小的目录 RPC。没有 master，也没有 KV 数据的网络拷贝。
 
-## 读取路径
+> **slotmap 模式**：写入 = 一次本地 memcpy 进入该 key 的槽（自有 key），或对目标桶
+> 做一次批量 READ-modify-WRITE（远端 key）—— 完全没有目录 PUT。
+
+## 读取路径（p2p 模式）
 
 ```mermaid
 sequenceDiagram
@@ -84,6 +112,10 @@ sequenceDiagram
 ```
 
 如果目录显示数据就在读取方自身，读取会退化为一次本地 `memcpy`，完全不走网络。
+
+> **slotmap 模式**：目录这一步消失了 —— `owner = ring(key)`、
+> `slot = bucket_hash(key)`，对整个桶做一次单边 READ，本地做头部校验。零拷贝落点相同，
+> 每次读取少一次 RPC。
 
 ## 拷贝次数
 
@@ -157,7 +189,9 @@ flowchart LR
 时延汇总（读写的 p50/p90/p99 与平均值）。可用 `metrics_enabled` 关闭、用
 `metrics_port` 改端口，或用 `metrics_dashboard` 仅关闭 HTML 页面。
 
-## 一致性哈希目录
+## 一致性哈希目录（p2p 模式）
+
+目录是 `p2p` 模式的位置存储（`slotmap` 模式完全没有目录 —— 见下文）。
 
 - 每个节点承载目录的一个**分片**：本地的 `key -> DataLocation` 映射。所有分片的
   并集构成完整目录；不存在中心存储。
@@ -165,6 +199,23 @@ flowchart LR
   独立地就 key 条目所在位置达成一致。
 - `directory_replicas > 1` 会把每条条目写入接下来的 N 个归属者以实现高可用；读取在
   副本之间回退。
+
+## 槽区域（slotmap 模式）
+
+在 `mode="slotmap"` 下目录不复存在。每个节点改而持有一块大小
+`num_buckets × ways × slot_stride` 字节的**固定槽区域** MR，并通过一次 layout RPC
+公告 `(base_addr, geometry, rkeys)`；对端缓存该 layout 后不再询问。
+
+- `key -> owner`：同一张一致性哈希环（`data_owner_all`）。
+- `key -> bucket`：对 key 独立取哈希（`bucket_hash`）。
+- `key -> way`：N-way 关联 —— `pick_way` 优先选空槽，其次选同一 key（覆盖），再次选
+  最老的序号（驱逐）。
+- 每个槽以一个带版本的 **seqlock 头部**（`key_hash128`、负载长度、序号）开始。
+  `slot_matches` 是唯一闸门：读取方绝不会返回别的 key 的页面、撕裂页面（序号为奇）或
+  长度不符的页面 —— miss 永远是*干净的*。
+
+于是读取路径变成：`owner = ring(key)` → `bucket = bucket_hash(key)` → 对整个桶做一次
+单边 RDMA READ → 命中时做头部校验后 memmove。没有元数据 RPC，也没有位置记录的再分片。
 
 ## 连接管理
 
@@ -205,3 +256,37 @@ PeerCache 在多线程 SGLang 下两侧都既安全又并行：
 - **目录持久性**：`directory_replicas` 默认 **2**,因此单节点丢失不会在 ring 重分片前
   丢掉某分片的位置记录(每个生产者在成员变更时重发布自己的页)。最坏情况是解析返回
   miss、SGLang 重算——安全降级。
+
+## 成熟度
+
+PeerCache **功能完备、已通过集成测试，但还不是 SGLang 部署的生产默认选项**。具体来说：
+
+### 已经扎实的部分（已验证）
+
+- **控制面正确性** —— 服务发现（内嵌多主）、一致性哈希环、目录分片/再分片、磁盘
+  分层（L4）、监控、TCP 回退传输：由仓库测试套件（`tests/`，77 个用例）覆盖并做过
+  端到端演练。
+- **两种模式的 SGLang 集成** —— PeerCacheStore 继承 sglang 真实的
+  `HiCacheStorage`；v1 与 v2（sidecar 池：DSA INDEXER、Mamba/SWA
+  TRAILING_PAGES、DeepSeek-V4 多缓冲区、Draft MHA/MLA）契约测试在 sglang main
+  分支类型下全部通过；真实 sglang server + Qwen2.5-0.5B 在 L20 上把 KV 发布进
+  PeerCache（`tests/sglang/`）。
+- **slotmap 跨节点读取** —— 真实 sglang server 的槽区域被一个独立节点逐页读回，
+  全程零目录查询（`tests/sglang/test_sglang_2node_slotmap_read.py`）。
+- **RDMA 构建** —— C++ 数据面在 libibverbs 下编译通过（`HAS_RDMA=True`，全套用例
+  通过）；无网卡机器可干净地回退到 TCP。
+
+### 仍待生产验证的部分
+
+| 项目 | 状态 | 阻塞点 |
+|---|---|---|
+| **跨主机 RoCE 单边 READ** | 方法学与工具已就绪（`peercache-bench serve`/`drive`，见 `performance.md`）；数字是为 `p2p` 测的 | 需要双主机 RoCE 集群对当前代码、并对 `slotmap` 重跑（bench 尚不支持驱动 slotmap） |
+| **DSA / Mamba / DeepSeek-V4 / Draft 真实模型 e2e** | 接口契约已验证 | 需要对应模型权重 + GPU 才能跑完整 server |
+| **官方 sglang 注册** | PR 材料已就绪（`sglang-pr/`），`create_backend("peercache")` 路径已验证 | 上游 review / 合入 |
+| **slotmap 生产调参** | 默认几何参数在 0.5B 模型上可用 | 为真实页面大小与命中率目标确定 `slot_max_page_bytes` / `slot_ways` / `slot_num_buckets` |
+| **`buffer_only` 主机模式** | sglang 0.5.9 还没有（仅 main） | 带 `--hicache-host-memory-mode buffer_only` 的 sglang 版本，以便在 e2e 中强制走 L3 读取 |
+
+### 结论
+
+把 PeerCache 视为**生产前 / 实验室可用**：设计已端到端验证（控制面、两种放置模式、
+sglang 集成、RDMA 构建），但生产采用应等跨主机 RoCE 数字与上游 sglang 注册落地。

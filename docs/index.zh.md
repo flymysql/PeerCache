@@ -66,7 +66,7 @@ PeerCache 是**去中心化的前缀/KV 复用缓存**——不是 PD 搬运引�
 | 整机，8 卡，多进程          | **413.1 GB/s**（≈ 3.3 Tbps）                           |
 
 
-PeerCache GET 吞吐：单卡 → 整机
+![PeerCache GET 吞吐：单卡 → 整机](assets/perf/scaling_ladder.png)
 
 图表、方法论与复现命令见 [性能基线](performance.md)。
 
@@ -84,10 +84,21 @@ master——对运行中的节点无单点故障。节点向其注册、心跳�
 memcpy，不走网络、不依赖 master），仅把一条极小的位置记录推送到目录。
 - **读取时单边 RDMA READ** —— `get()` 先查目录，再发起一次零拷贝
 `IBV_WR_RDMA_READ`，数据直接落入 SGLang 已注册的主机缓冲区。
+- **Slotmap 模式（免目录）** —— 另一种放置模式（`"mode":"slotmap"`）：key 经哈希
+映射到固定物理槽，读取方对整个 N-way 桶只发 **一次** 单边 READ，完全不做元数据
+查询。见 [slotmap.md](slotmap.md)。
 - **磁盘持久化分层（L4）** —— 被内存淘汰的页面会落盘（默认 `/data/peercache/`，
 `100GB`），并在之后的读取时由本地或远端读取方提升回内存池。
 - **内置监控** —— 提供 Prometheus `/metrics` 端点和内嵌 HTML 可视化页面（默认端口
 `31997`）：命中率、吞吐、时延 p50/p99、内存/磁盘用量等。
+
+## 成熟度
+
+PeerCache **实验室可用 / 生产前**：控制面、两种放置模式、SGLang 集成（v1 + v2
+sidecar 池）以及 RDMA 构建均已验证（见 [架构](architecture.md#成熟度)）。生产采用前
+还剩两件事：在最新代码上测出跨主机 RoCE 单边 READ 数字（方法学见
+[性能基线](performance.md)），以及让上游 sglang 注册落地
+（[sglang-pr](../sglang-pr/README.md)）。
 
 ## 下一步
 
