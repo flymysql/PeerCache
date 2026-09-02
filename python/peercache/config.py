@@ -117,6 +117,14 @@ class PeerCacheConfig:
     # never collide. All nodes of one deployment must use the same prefix.
     prefix: str = ""
 
+    # --- SGLang interface selection -----------------------------------------
+    # sglang's cache_controller reads extra_config["interface_v1"] to choose the
+    # zero-copy v1 path (batch_set/get_v1) vs the generic value/pointer path.
+    # PeerCache implements v1 zero-copy, so deployments should set
+    # "interface_v1": 1 in the extra config (this field is accepted so the
+    # config parser doesn't drop it).
+    interface_v1: bool = False
+
     # --- Deterministic slot-map placement (mode=slotmap) --------------------
     # When mode="slotmap", PeerCache drops the directory entirely: a key maps to
     # its owner by the ring and to a fixed physical slot by hashing, so a reader
@@ -319,6 +327,7 @@ class PeerCacheConfig:
             "metrics_dashboard",
             "node_id",
             "prefix",
+            "interface_v1",
             "heartbeat_interval",
             "member_ttl",
             "max_masters",

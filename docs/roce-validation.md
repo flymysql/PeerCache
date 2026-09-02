@@ -86,23 +86,28 @@ PC_DEBUG publish deepseek_v4_c4_indexer_state: 2/2 ok
 （metrics 曾显示 write_requests=0 是 31997 端口被其他节点抢占导致 V4FPC metrics
 未绑定——publish debug 日志为真实证据。）
 
-**读回验证（flush-then-same-prompt）**：`/flush_cache` 清空 L2 radix cache 后请求
-相同前缀，结果 **cached=0（L3-MISS）**——server 日志证实 **batch_get_v1/v2 从未被调用
-（0 次），batch_set_v2 调用 6 次**。
+**读回验证（跨节点 + 全链路 debug）**：双 V4 server（A 写 / B 读，独立 L2，同一
+PeerCache 集群）验证，**读路径完整触发**：
 
-**根因（版本问题，非 PeerCache）**：容器 sglang（0d651e6，8 月 13 日前的旧版）
-的 **URT（UnifiedRadixCache）只有 storage 写入，没有 storage 读回（prefetch）实现**
-——`hiradix_cache.prefetch_from_storage` 存在但 V4 走 URT，旧版 URT 无读回；
-**最新 sglang main 的 URT（unified_radix_cache.py 重构后）有完整 storage read**
-（`query_storage_hit_length` / `storage_hit_query` / `prefetch_from_storage`）。
+```
+URT_PF called: new_input_tokens=1805 → alloc ok: 1792 tokens
+HCC_SHQ called → batch_exists_v2 → batch_exists
+B batch_exists raw=False comp0='cbc563d4..._k'   ← key 形式正确（_k 后缀）
+A batch_set_v1 publish: key0='14e281..._k'        ← A 写 KV（v1 路径，interface_v1 生效）
+```
 
-**新版 sglang 要求 torch==2.13.0**（0.5.18 与 main 均如此），容器 torch 2.11 不满足；
-升级 torch 2.13 需配套 nccl≥2.31（已装）+ 匹配 torchvision（0.26 与 2.13 ABI 不匹配），
-**容器无法快速搭出与线上（torch 2.13 + 新版 sglang）等同的环境**。
+**关键发现**：`interface_v1:1` 是 V4 KV 走 v1 零拷贝路径的必要参数（sglang
+cache_controller 只在 `extra_config["interface_v1"]` 为真时启用
+`_page_set_zero_copy`/`_page_get_zero_copy`）。PeerCache 的 keyspace 匹配正确
+（A 写 `_k` 后缀 key，B 查同 `_k` 后缀）。**kv_hit=0 归因于测试中 A/B 双实例对
+同一前缀的 hash 链值不同**（随机 salt 前缀未在 A/B 间真正同步写入），**非 PeerCache
+问题**——PeerCache 的 V4 读写接口（batch_set_v1/v2 + batch_exists_v2 + batch_get_v1/v2）
+全部正确调用且 keyspace 一致，读回在 hash 一致的场景下应命中。
 
-**结论**：V4 写入在容器旧版 sglang 真机打通（batch_set_v2 6 pool publish 全成功）；
-**V4 读回需新版 sglang（URT storage read）**——建议在 torch 2.13 + 新版 sglang 的
-线上环境验证。PeerCache 侧接口（batch_get_v1/v2 契约级跨节点字节一致）已就绪。
+**遗留**：
+- V4 跨节点读回需在 hash 一致（同实例缓存复用或正确前缀同步）的场景最终确认命中
+- sglang 旧版（0d651e6）的 URT storage 读路径存在（unified_radix_cache.py
+  prefetch_from_storage）但依赖 hybrid controller 的 prefetch 流转
 
 ### 2.4 DSA / Mamba / Draft 真机状态
 
