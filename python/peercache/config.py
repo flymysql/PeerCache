@@ -336,6 +336,10 @@ class PeerCacheConfig:
             "slot_num_buckets",
         }
         kwargs = {k: v for k, v in extra.items() if k in known}
+        if "interface_v1" in kwargs:
+            # Normalize the sglang-style int/str flag to a real bool so the
+            # dataclass field type holds (config.interface_v1 is True/False).
+            kwargs["interface_v1"] = bool(kwargs["interface_v1"])
         return cls(**kwargs)
 
 

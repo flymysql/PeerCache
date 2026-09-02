@@ -464,3 +464,101 @@ def test_v2_trailing_pages_hit_policy(cluster, monkeypatch):
     out2 = b.batch_exists_v2(keys2, pool_transfers=transfers2)
     assert out2.prefix_keys == 0
 
+
+# --------------------------------------------------------------------------- #
+# DeepSeek-V4 HostPoolGroup registration (anchor KV + side pools as a group)
+# --------------------------------------------------------------------------- #
+class _HPGEntry:
+    """One pool inside a HostPoolGroup (mirrors sglang pool_host/group.py)."""
+
+    def __init__(self, name, host_pool, is_anchor=False):
+        self.name = name
+        self.host_pool = host_pool
+        self.is_primary_index_anchor = is_anchor
+
+
+class _HostPoolGroup:
+    """sglang HostPoolGroup facade: anchor KV pool + side pools."""
+
+    def __init__(self, entries):
+        self.entries = list(entries)
+        self.entry_map = {e.name: e for e in entries}
+        self.anchor_entry = next(
+            (e for e in entries if e.is_primary_index_anchor), entries[0]
+        )
+
+    def get_entry(self, name=None):
+        return self.anchor_entry if name is None else self.entry_map[name]
+
+
+def _side_pool(page_bytes, num_pages):
+    """Single-buffer side pool (swa/c4/state etc.) with get_page_buffer_meta."""
+    buf = _Buf(page_bytes * num_pages)
+    return SimpleNamespace(
+        page_bytes=page_bytes,
+        kv_buffer=buf,
+        v_buffer=_Buf(page_bytes * num_pages),
+        bufs=[buf],
+        get_page_buffer_meta=lambda idx: (
+            [buf.data_ptr() + i * page_bytes for i in idx],
+            [page_bytes] * len(idx),
+        ),
+    )
+
+
+def test_v4_host_pool_group_registers_all_pools(cluster):
+    """DeepSeek-V4 HiCache passes a HostPoolGroup; every pool (anchor + sidecars)
+    must land in registered_pools so v2 batch ops can resolve them by name."""
+    a, b = cluster
+    page, n = 4096, 8
+    anchor = _MemPoolHost(page, n)
+    side_names = ["swa", "deepseek_v4_c4", "deepseek_v4_c4_indexer",
+                  "deepseek_v4_c128", "deepseek_v4_c4_state",
+                  "deepseek_v4_c4_indexer_state"]
+    entries = [_HPGEntry("kv", anchor, is_anchor=True)]
+    entries += [_HPGEntry(name, _side_pool(page, n)) for name in side_names]
+    group = _HostPoolGroup(entries)
+
+    a.register_mem_pool_host(group)
+    b.register_mem_pool_host(group)
+
+    # Anchor pool became mem_pool_host; every side pool is registered by name.
+    assert a.mem_pool_host is anchor
+    for name in ["kv"] + side_names:
+        assert name in a.registered_pools, f"pool {name} not registered"
+        assert b.registered_pools.get(name) is not None
+
+    # KV round-trip through the group-registered pools.
+    keys = [f"v4g{i}" for i in range(4)]
+    res = a.batch_set_v2([
+        SimpleNamespace(name="kv", keys=keys, host_indices=list(range(4))),
+        SimpleNamespace(name="deepseek_v4_c4", keys=keys, host_indices=list(range(4))),
+        SimpleNamespace(name="deepseek_v4_c128", keys=keys, host_indices=list(range(4))),
+    ])
+    assert all(res.get("kv")) and all(res.get("deepseek_v4_c4")) and all(res.get("deepseek_v4_c128"))
+    res = b.batch_get_v2([
+        SimpleNamespace(name="kv", keys=keys, host_indices=list(range(4))),
+        SimpleNamespace(name="deepseek_v4_c4", keys=keys, host_indices=list(range(4))),
+        SimpleNamespace(name="deepseek_v4_c128", keys=keys, host_indices=list(range(4))),
+    ])
+    assert all(res.get("kv")) and all(res.get("deepseek_v4_c4")) and all(res.get("deepseek_v4_c128"))
+
+
+def test_config_parses_interface_v1_and_known_keys():
+    """interface_v1 (a pass-through flag sglang reads to pick the zero-copy v1
+    path) must survive from_extra_config without being dropped."""
+    from peercache.config import PeerCacheConfig
+
+    cfg = PeerCacheConfig.from_extra_config({
+        "discovery_addr": "127.0.0.1:31998",
+        "interface_v1": 1,
+    })
+    assert cfg.interface_v1 is True
+    # Unknown keys are ignored; interface_v1 is accepted (not dropped silently).
+    cfg2 = PeerCacheConfig.from_extra_config({
+        "discovery_addr": "127.0.0.1:31998",
+        "interface_v1": 0,
+    })
+    assert cfg2.interface_v1 is False
+
+
