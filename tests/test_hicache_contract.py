@@ -562,3 +562,51 @@ def test_config_parses_interface_v1_and_known_keys():
     assert cfg2.interface_v1 is False
 
 
+def test_logical_anchor_without_backing_buffer_is_tolerated(cluster):
+    """DeepSeek-V4 real registration: sglang passes the anchor *host pool* of a
+    HostPoolGroup — a LogicalHostPool whose kv_buffer is None — to
+    register_mem_pool_host, then registers each backing side pool via
+    register_mem_host_pool_v2. PeerCache must tolerate the no-buffer anchor
+    (no recv MR, but a published pool is still created) and keep the
+    v2-registered pools fully usable."""
+    a, b = cluster
+    page, n = 4096, 64
+
+    class _LogicalAnchor:
+        """Mirror sglang LogicalHostPool: owns page indices, no backing buffer."""
+
+        def __init__(self, page_bytes, num_pages):
+            self.kv_buffer = None  # pure-logical anchor
+            self.page_bytes = page_bytes
+            self._buf = _Buf(page_bytes * num_pages)
+
+        def get_page_buffer_meta(self, host_indices):
+            base = self._buf.data_ptr()
+            return ([base + i * self.page_bytes for i in host_indices],
+                    [self.page_bytes] * len(host_indices))
+
+    anchor_a = _LogicalAnchor(page, n)
+    anchor_b = _LogicalAnchor(page, n)
+    for s in (a, b):
+        s.register_mem_pool_host(anchor_a if s is a else anchor_b)
+
+    # Logical anchor tolerated: mem_pool_host set, no crash, published pool made.
+    assert a.mem_pool_host is anchor_a
+    assert a._pool is not None and a._pool.capacity > 0
+
+    # Backing side pools registered via v2 and fully usable.
+    side = ["swa", "deepseek_v4_c4", "deepseek_v4_c128"]
+    for s in (a, b):
+        for name in side:
+            s.register_mem_host_pool_v2(_MemPoolHost(page, n), name)
+    keys = [f"lan{i}" for i in range(4)]
+    for name in side:
+        t = SimpleNamespace(name=name, keys=keys, host_indices=list(range(4)))
+        assert all(a.batch_set_v2([t])[name])
+        assert all(b.batch_get_v2([t])[name])
+
+    # v1 ops on the logical anchor degrade gracefully (no crash), not a bare assert.
+    assert all(not x for x in a.batch_set_v1(keys, list(range(4))))
+    assert all(not x for x in b.batch_get_v1(keys, list(range(4))))
+
+

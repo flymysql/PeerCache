@@ -305,9 +305,20 @@ class PeerCacheStore(HiCacheStorage):
         """Register a host pool's KV buffer as a receive MR (READ destination).
 
         The buffer may be host or GPU memory (GPUDirect); a registration failure
-        here usually means GPUDirect isn't available on the host."""
+        here usually means GPUDirect isn't available on the host.
+
+        A pool with no backing ``kv_buffer`` is a *logical anchor* (DeepSeek-V4
+        hybrid: its physical tensors are registered pool-by-pool via
+        ``register_mem_host_pool_v2``). Recv-MR registration is skipped there —
+        read destinations are lazily registered by the C++ data plane per
+        batch_get, so this is not a functional gap.
+        """
         kv = getattr(host_pool, "kv_buffer", None)
         if kv is None:
+            logger.debug(
+                "peercache: host pool has no backing kv_buffer (logical anchor); "
+                "recv MR skipped — read destinations are lazily registered"
+            )
             return
         kv_bytes = kv.numel() * kv.element_size()
         self._recv_mr = self._register_buffer(kv.data_ptr(), kv_bytes, kv)
@@ -720,26 +731,40 @@ class PeerCacheStore(HiCacheStorage):
         return present
 
     def register_mem_pool_host(self, mem_pool_host):
-        """SGLang v1 registration: one KV host pool.
+        """SGLang v1 registration: the KV host pool.
 
-        DeepSeek-V4 HiCache passes a HostPoolGroup (anchor KV pool + side
-        pools: full/swa/c4/c128/state) instead of a single HostKVCache.
-        Unwrap to the anchor pool for recv-MR registration, and register
-        every pool (anchor + sidecars) so v2 batch_set/get can resolve
-        them by name."""
-        if hasattr(mem_pool_host, "get_entry") and hasattr(mem_pool_host, "entries"):
-            anchor = mem_pool_host.anchor_entry
-            self._host_pool_group = mem_pool_host
+        For hybrid models (DeepSeek-V4 etc.) sglang may pass the anchor pool of
+        a HostPoolGroup, which is a *logical* anchor with no backing
+        ``kv_buffer`` (its physical tensors are registered pool-by-pool through
+        ``register_mem_host_pool_v2`` — mirror mooncake). We therefore tolerate
+        an anchor without a backing buffer: recv-MR registration is skipped
+        (read destinations are lazily registered by the C++ data plane per
+        batch_get), and the published pool is still created so side-pool
+        publishes have somewhere to go.
+
+        If the pool is itself a HostPoolGroup facade (defensive; not how
+        current sglang calls), unwrap it and register every side pool by name.
+        """
+        if getattr(mem_pool_host, "anchor_entry", None) is not None:
+            # HostPoolGroup facade (defensive): register every pool by name and
+            # use the anchor's host pool as mem_pool_host.
+            group = mem_pool_host
+            self._host_pool_group = group
             self._registered_pool_names = []
-            for entry in mem_pool_host.entries:
+            for entry in group.entries:
                 name = str(entry.name)
-                self.registered_pools[name] = entry.host_pool
-                self._registered_pool_names.append(name)
-            mem_pool_host = anchor.host_pool
+                pool = entry.host_pool
+                if getattr(pool, "kv_buffer", None) is not None:
+                    self.registered_pools[name] = pool
+                    self._registered_pool_names.append(name)
+            anchor_pool = group.anchor_entry.host_pool
             logger.info(
-                "peercache: unwrapped HostPoolGroup -> anchor %s (pools: %s)",
-                getattr(anchor, "name", "?"), self._registered_pool_names,
+                "peercache: unwrapped HostPoolGroup -> anchor %s (registered %d backing pools: %s)",
+                getattr(group.anchor_entry, "name", "?"),
+                len(self._registered_pool_names),
+                self._registered_pool_names,
             )
+            mem_pool_host = anchor_pool
         self.mem_pool_host = mem_pool_host
         self._register_recv(mem_pool_host)
         self._ensure_published_pool()
@@ -1009,17 +1034,54 @@ class PeerCacheStore(HiCacheStorage):
     # ------------------------------------------------------------------ #
     # v1 zero-copy paths (primary)
     # ------------------------------------------------------------------ #
+    def _v1_buffer_meta(self, keys, host_indices):
+        """Resolve host page buffers for a v1 op.
+
+        A logical anchor (DeepSeek-V4 hybrid) has no backing buffers — the
+        physical tensors live in v2-registered side pools, so the v1 path is
+        not usable for it. Return None instead of crashing the backup/prefetch
+        thread with a bare assert.
+        """
+        pool = self.mem_pool_host
+        if pool is None or getattr(pool, "kv_buffer", None) is None:
+            logger.debug(
+                "peercache: v1 op on pool without backing kv_buffer "
+                "(logical anchor); v1 path not usable here"
+            )
+            return None
+        try:
+            return pool.get_page_buffer_meta(host_indices)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("peercache: get_page_buffer_meta failed: %s", e)
+            return None
+
     def batch_set_v1(self, keys, host_indices, extra_info=None) -> List[bool]:
+        meta = self._v1_buffer_meta(keys, host_indices)
+        if meta is None:
+            return [False] * len(keys)
         comp_keys, mult = self._component_keys(keys)
-        ptrs, sizes = self.mem_pool_host.get_page_buffer_meta(host_indices)
-        assert len(comp_keys) == len(ptrs) == len(sizes)
+        ptrs, sizes = meta
+        if not (len(comp_keys) == len(ptrs) == len(sizes)):
+            logger.warning(
+                "peercache: v1 set meta mismatch: %d comp keys vs %d buffers",
+                len(comp_keys), len(ptrs),
+            )
+            return [False] * len(keys)
         comp_results = self._publish(comp_keys, ptrs, sizes)
         return self._page_results(comp_results, mult)
 
     def batch_get_v1(self, keys, host_indices, extra_info=None) -> List[bool]:
+        meta = self._v1_buffer_meta(keys, host_indices)
+        if meta is None:
+            return [False] * len(keys)
         comp_keys, mult = self._component_keys(keys)
-        ptrs, sizes = self.mem_pool_host.get_page_buffer_meta(host_indices)
-        assert len(comp_keys) == len(ptrs) == len(sizes)
+        ptrs, sizes = meta
+        if not (len(comp_keys) == len(ptrs) == len(sizes)):
+            logger.warning(
+                "peercache: v1 get meta mismatch: %d comp keys vs %d buffers",
+                len(comp_keys), len(ptrs),
+            )
+            return [False] * len(keys)
         comp_results = self._fetch(comp_keys, ptrs, sizes)
         return self._page_results(comp_results, mult)
 
