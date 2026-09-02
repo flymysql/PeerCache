@@ -6,6 +6,28 @@ All notable changes to PeerCache are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+- **DeepSeek-V4 HostPoolGroup support** — `register_mem_pool_host` now unwraps
+  sglang's `HostPoolGroup` (V4 HiCache passes an anchor KV pool + side pools
+  `swa`/`deepseek_v4_c4`/`c4_indexer`/`c128`/`c4_state`/`c4_indexer_state` as a
+  group) and registers **every** pool into `registered_pools` so v2
+  `batch_set/get/exists_v2` resolve them by name. Verified on a real V4
+  server: `batch_set_v2` is called with all 6 V4 pools and every publish
+  succeeds.
+- **`interface_v1` config flag** — accepted (pass-through) so sglang's
+  `cache_controller` enables the zero-copy v1 path (`batch_set/get_v1`) for
+  PeerCache. Real-machine finding: without `"interface_v1": 1` in the extra
+  config, KV pages go through the generic value/pointer path and never reach
+  `batch_set_v1`. `from_extra_config` normalizes the int/str flag to bool.
+- **Tests: HostPoolGroup registration + interface_v1 parsing** —
+  `tests/test_hicache_contract.py` gained a mocked `HostPoolGroup` registration
+  test (anchor unwrap + all side pools registered + v2 round-trips) and a
+  config parsing test.
+
+### Fixed
+- `from_extra_config` normalizes `interface_v1` to a real bool so the dataclass
+  field type holds.
+
 ## [0.8.3] - 2026-09-01
 
 ### Added

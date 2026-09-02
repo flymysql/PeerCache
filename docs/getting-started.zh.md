@@ -68,6 +68,7 @@ python -m sglang.launch_server \
     "ib_port": 1,
     "gid_index": 3,
     "global_segment_size": "8gb",
+    "interface_v1": 1,
     "disk_enabled": true,
     "disk_path": "/data/peercache/",
     "disk_size": "100gb"
@@ -77,6 +78,41 @@ python -m sglang.launch_server \
 > 磁盘分层(L4)**默认开启**。`disk_path` 必须在每个节点上可写(各自使用一个
 > `node_id` 子目录);建议指向一块大而快的本地盘(NVMe)。设 `"disk_enabled": false`
 > 可只用内存池。每节点总容量 ≈ `global_segment_size`(内存) + `disk_size`(磁盘)。
+>
+> **`interface_v1`（推荐设 1）**：SGLang 的 `cache_controller` 仅在
+> `extra_config["interface_v1"]` 为真时才启用零拷贝 v1 路径
+> （`batch_set/get_v1`，`_page_set_zero_copy`）；否则 KV 页走通用
+> value/pointer 路径（`batch_set` 通用接口）。PeerCache 实现了 v1 零拷贝，
+> MLA/MHA/V4 建议开启。
+
+### 2b. Slotmap 模式（免目录，可选）
+
+设 `"mode": "slotmap"` 可去掉分布式目录：key 经哈希映射到固定物理槽，
+读方只需 **一次** one-sided RDMA READ（无元数据查询）。需
+`slot_max_page_bytes` ≥ 你的 KV 页大小。
+
+```bash
+python -m sglang.launch_server \
+  --model-path <model> \
+  --enable-hierarchical-cache \
+  --hicache-storage-backend dynamic \
+  --hicache-storage-backend-extra-config '{
+    "backend_name": "peercache",
+    "module_path":  "peercache.store",
+    "class_name":   "PeerCacheStore",
+    "discovery_addr": "NODE0_IP:31998",
+    "protocol": "rdma",
+    "mode": "slotmap",
+    "slot_max_page_bytes": 262144,
+    "slot_ways": 4,
+    "slot_num_buckets": 0,
+    "device_name": "mlx5_0"
+  }'
+```
+
+> slotmap 没有 published pool，`pool_keys` 恒为 0（设计如此）；改看
+> `write_requests` / `bytes_written`。完整设计、调参与成熟度见
+> [slotmap.md](slotmap.md)。
 
 ## 3. 中心化模式(可选 — 专用 KV 缓存服务器)
 
@@ -139,6 +175,7 @@ flowchart LR
 | `module_path` | — | `peercache.store`（必填） |
 | `class_name` | — | `PeerCacheStore`（必填） |
 | `discovery_addr` | — | 引导 head `host:port`(或逗号分隔的 seed 列表)，**所有节点一致**；head 被钉为首席发现 master,每个 host 都运行一个 master（**必填**） |
+| `interface_v1` | `0` | **设 1 启用零拷贝 v1 路径**（`batch_set/get_v1`）。SGLang `cache_controller` 仅在 `extra_config["interface_v1"]` 为真时接 `_page_set_zero_copy`/`_page_get_zero_copy`；否则 KV 走通用 value/pointer 路径。PeerCache 实现了 v1 零拷贝（MLA/MHA/V4 推荐）。 |
 
 RDMA / 传输：
 

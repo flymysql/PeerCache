@@ -123,6 +123,15 @@ sglang 调度层**按架构选择 v1 / v2 + sidecar pool**，PeerCache 必须逐
 
 产出：每架构一个 `tests/sglang/test_<arch>_backend.py` + 实测报告。
 
+**真机验证进展（2026-09，RoCE GPU 环境，见 [roce-validation.md](roce-validation.md)）**：
+- **DeepSeek-V4**：HostPoolGroup（anchor + `swa`/`c4`/`c4_indexer`/`c128`/`c4_state`/`c4_indexer_state`）
+  全部注册，`batch_set_v2` 6 pool publish 全成功（真机）。**关键参数 `"interface_v1": 1`**
+  （否则 sglang 不走 `batch_set_v1` 零拷贝，KV 落通用路径）。
+- **DSA/Mamba/Draft**：契约级通过（INDEXER/TRAILING/DRAFT pool）；真机需对应权重
+  （V3.2 643GB 单机放不下，模型库无 Mamba/Draft）。
+- **V4 读回**：读路径完整触发（URT prefetch → `_storage_hit_query` → `batch_exists_v2`），
+  跨节点命中确认需 hash 一致场景（torch≥2.13 + 新版 sglang）。
+
 ### Step 3：sglang 合入 PR（对 upstream）
 1. `backend_factory.py` + `server_args.py` 注册 `peercache`
 2. 可选依赖策略（sglang 不强制依赖 peercache）
