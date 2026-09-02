@@ -213,6 +213,7 @@ Required keys (the dynamic-backend factory needs the first three):
 | `module_path` | — | `peercache.store` (required) |
 | `class_name` | — | `PeerCacheStore` (required) |
 | `discovery_addr` | — | bootstrap head `host:port` (or a comma-separated seed list), **same on all nodes**; the head is pinned as the primary discovery master, every host runs a master (**required**) |
+| `interface_v1` | `0` | **Set to `1` to enable the zero-copy v1 path** (`batch_set/get_v1`). SGLang's `cache_controller` only wires `_page_set_zero_copy`/`_page_get_zero_copy` when `extra_config["interface_v1"]` is truthy; without it, KV pages go through the generic value/pointer path instead. PeerCache implements v1 zero-copy (recommended for MLA/MHA/V4). |
 
 Deployment mode:
 
