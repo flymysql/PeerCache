@@ -49,6 +49,32 @@ choices=[
 ],
 ```
 
+### 1.3 cache_controller.py — v1 零拷贝路径启用（关键！）
+
+sglang 的 `cache_controller.attach_storage_backend` 里，零拷贝 v1 路径
+（`page_set_func = _page_set_zero_copy` → `batch_set_v1`）只在**内置 backend
+列表**或 `extra_config["interface_v1"]` 为真时启用：
+
+```python
+if storage_backend_type in ["hf3fs", "mooncake", "eic", "nixl", "simm"] or (
+    storage_backend_type == "dynamic"
+    and bool(storage_config.extra_config.get("interface_v1", 0))
+):
+    self.page_get_func = self._page_get_zero_copy
+    self.page_set_func = self._page_set_zero_copy
+```
+
+**把 `peercache` 加进内置列表**，这样注册为内置 backend 后自动走 v1
+零拷贝（用户无需手动加 `"interface_v1": 1`）：
+
+```python
+if storage_backend_type in ["hf3fs", "mooncake", "eic", "nixl", "simm",
+                            "peercache"] or (...):
+```
+
+> 若不改此处，PeerCache 的 KV 会走通用 value/pointer 路径（`batch_set`
+> 通用接口），`batch_set_v1` 从不被调用——功能仍通但少了 v1 零拷贝路径。
+
 ---
 
 ## 2. registered 测试（test/registered/hicache/）
