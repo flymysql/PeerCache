@@ -280,6 +280,14 @@ Publishable one-sided-RDMA numbers require real RoCE/IB hardware — see
 [python/peercache/bench/README.md](python/peercache/bench/README.md) for the
 `peercache-bench serve`/`drive` two-node harness.
 
+## Contributing
+
+Patches are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). Questions, deployment
+setups and benchmark comparisons go to
+[Discussions](https://github.com/flymysql/PeerCache/discussions); reproducible bugs go
+to [Issues](https://github.com/flymysql/PeerCache/issues). For security reports, see
+[SECURITY.md](SECURITY.md) instead of opening a public issue.
+
 ## Maintainer setup (one-time)
 
 - **GitHub Pages**: Settings → Pages → Build and deployment → Source = **GitHub

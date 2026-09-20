@@ -184,6 +184,13 @@ pip install -e ".[test]"
 pytest -q
 ```
 
+## 参与贡献
+
+欢迎提交补丁，请先阅读 [CONTRIBUTING.md](CONTRIBUTING.md)。使用问题、部署环境与性能对比请走
+[讨论区](https://github.com/flymysql/PeerCache/discussions)；可复现的缺陷请提
+[Issue](https://github.com/flymysql/PeerCache/issues)。安全问题请按
+[SECURITY.md](SECURITY.md) 私下反馈，不要开公开 issue。
+
 ## 维护者一次性配置
 
 - **GitHub Pages**：Settings → Pages → Build and deployment → Source = **GitHub
