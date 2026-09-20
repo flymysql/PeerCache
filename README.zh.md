@@ -6,6 +6,8 @@
 [![Docs](https://github.com/flymysql/PeerCache/actions/workflows/docs.yml/badge.svg)](https://flymysql.github.io/PeerCache/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
+由 [@flymysql](https://github.com/flymysql) 维护 · [博客](https://gitpull.cn) · [讨论区](https://github.com/flymysql/PeerCache/discussions) · [Issue](https://github.com/flymysql/PeerCache/issues)
+
 一个轻量的、点对点（P2P）的 **SGLang HiCache L3 存储后端**，面向
 **PD 解耦（prefill/decode）推理**：prefill 节点发布 KV 页，decode 节点经 RDMA 零 CPU 拷贝读回。
 
