@@ -106,3 +106,5 @@ jobs:
         with:
           packages-dir: dist
           skip-existing: true
+
+# workflow file touched to re-register Actions after the 2026-09 repository rename
