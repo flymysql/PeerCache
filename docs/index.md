@@ -106,7 +106,7 @@ modes, the SGLang integration (v1 + v2 sidecar pools), and the RDMA build are
 all verified (see [architecture.md](architecture.md#maturity)). Two things
 remain before production adoption: cross-host RoCE one-sided-READ numbers on
 current code (methodology in [performance.md](performance.md)) and landing the
-upstream sglang registration ([sglang-pr](../sglang-pr/README.md)).
+upstream sglang registration ([sglang-pr](https://github.com/flymysql/PeerCache/tree/main/sglang-pr)).
 
 ## Next steps
 

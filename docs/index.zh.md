@@ -98,7 +98,7 @@ PeerCache **实验室可用 / 生产前**：控制面、两种放置模式、SGL
 sidecar 池）以及 RDMA 构建均已验证（见 [架构](architecture.md#成熟度)）。生产采用前
 还剩两件事：在最新代码上测出跨主机 RoCE 单边 READ 数字（方法学见
 [性能基线](performance.md)），以及让上游 sglang 注册落地
-（[sglang-pr](../sglang-pr/README.md)）。
+（[sglang-pr](https://github.com/flymysql/PeerCache/tree/main/sglang-pr)）。
 
 ## 下一步
 
